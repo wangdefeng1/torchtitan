@@ -452,6 +452,7 @@ def test_forward_backward_runs_whole_accumulation(
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine._accelerator_graph_per_microbatch_group_enabled = per_group_graph
+    engine._dist_moe_runtime = None
     engine.sdc_replayer = None
     engine._non_pp_forward_backward_microbatch = forward_backward_body
     engine._run_forward_backward = partial(
@@ -925,6 +926,9 @@ def test_optim_step_waits_for_checkpoint() -> None:
             checkpointer=SimpleNamespace(
                 maybe_wait_for_staging=lambda: events.append("checkpoint")
             ),
+            _dist_moe_runtime=SimpleNamespace(
+                finish_overflow_check=lambda: events.append("overflow_check")
+            ),
             optim=optim,
         ),
     )
@@ -932,7 +936,7 @@ def test_optim_step_waits_for_checkpoint() -> None:
     grad_norm = TrainingEngine.optim_step(engine)
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
-    assert events == ["checkpoint", "optimization_3"]
+    assert events == ["checkpoint", "overflow_check", "optimization_3"]
     assert engine.num_completed_steps == 3
 
 
@@ -987,6 +991,29 @@ def test_train_preserves_oom_for_profiler_close(wrapped: bool) -> None:
     assert not hasattr(engine, "profiler")
     engine.close_profiler()
     memory_profiler.step.assert_called_once_with(exit_ctx=True)
+
+
+def test_dist_moe_overflow_stops_optimizer_commit() -> None:
+    """A planner-capacity failure leaves parameters and step state untouched."""
+    runtime = SimpleNamespace(
+        finish_overflow_check=MagicMock(side_effect=ValueError("overflow"))
+    )
+    optim = SimpleNamespace(step=MagicMock())
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            num_completed_steps=4,
+            loss=torch.tensor(1.0),
+            _dist_moe_runtime=runtime,
+            optim=optim,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="overflow"):
+        TrainingEngine.optim_step(engine)
+
+    optim.step.assert_not_called()
+    assert engine.num_completed_steps == 4
 
 
 @pytest.mark.parametrize(
@@ -1049,6 +1076,7 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
             device=torch.device("cpu"),
             forward_backward=forward_backward,
             loss=graph_loss,
+            _dist_moe_runtime=None,
             sdc_replayer=None,
             model_parts=[],
             model_config=SimpleNamespace(mtp_layers=None),
@@ -1093,9 +1121,14 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
 
 @pytest.mark.parametrize("disable_accelerator_graphs", [False, True])
 @pytest.mark.parametrize("per_group", [False, True])
+@pytest.mark.parametrize(
+    ("has_first_stage", "has_last_stage"),
+    [(True, False), (False, True), (True, True)],
+)
 def test_engine_prepares_pp_metadata_before_accelerator_graph(
-    disable_accelerator_graphs, per_group
+    disable_accelerator_graphs, per_group, has_first_stage, has_last_stage
 ):
+    """Graph preparation consumes structured PP inputs and first-microbatch loss kwargs."""
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
         dist_moe_runtime=None,
@@ -1135,17 +1168,34 @@ def test_engine_prepares_pp_metadata_before_accelerator_graph(
             return
         wrap = wrap_group if per_group else wrap_update
         inputs, labels = torch.ones(1, 4), torch.zeros(1, 4)
-        advantages, global_loss_token_counts = torch.ones(1, 4), torch.tensor(4)
-        # PP layout: (arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs).
-        group = ([(inputs,)], [{}], [labels], [{"advantages": advantages}])
-        wrap.call_args.kwargs["prepare_for_capture"]([group], global_loss_token_counts)
+        positions = torch.arange(4)
+        advantages = torch.tensor([0.5])
+        original_counts = torch.tensor(1)
+        global_counts = torch.tensor(4)
+        loss_kwargs = {
+            "advantages": advantages,
+            "global_loss_token_counts": original_counts,
+        }
+        group = (
+            [(inputs,)] if has_first_stage else None,
+            [{"positions": positions}],
+            [labels] if has_last_stage else None,
+            [loss_kwargs],
+        )
+        wrap.call_args.kwargs["prepare_for_capture"]([group], global_counts)
         assert prepare.call_args.args == (engine.pp_schedule,)
-        assert prepare.call_args.kwargs["args"] == (inputs,)
-        assert prepare.call_args.kwargs["target"] is labels
-        loss_kwargs = prepare.call_args.kwargs["loss_kwargs"]
-        assert loss_kwargs.keys() == {"advantages", "global_loss_token_counts"}
-        assert loss_kwargs["advantages"] is advantages
-        assert loss_kwargs["global_loss_token_counts"] is global_loss_token_counts
+        assert prepare.call_args.kwargs["args"] == (
+            (inputs,) if has_first_stage else ()
+        )
+        assert prepare.call_args.kwargs["kwargs"]["positions"] is positions
+        assert prepare.call_args.kwargs["target"] is (
+            labels if has_last_stage else None
+        )
+        prepared_loss_kwargs = prepare.call_args.kwargs["loss_kwargs"]
+        assert prepared_loss_kwargs.keys() == {"advantages", "global_loss_token_counts"}
+        assert prepared_loss_kwargs["advantages"] is advantages
+        assert prepared_loss_kwargs["global_loss_token_counts"] is global_counts
+        assert loss_kwargs["global_loss_token_counts"] is original_counts
 
 
 def test_engine_replay_checks_whole_accumulation() -> None:
@@ -1179,6 +1229,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
         ]
     )
     engine._run_forward_backward = run_forward_backward
+    engine._dist_moe_runtime = MagicMock()
 
     TrainingEngine.forward_backward(
         engine,
@@ -1191,6 +1242,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     assert replayer.run_fwd_bwd.call_args.kwargs["step"] == 1
     assert callable(replayer.run_fwd_bwd.call_args.kwargs["get_loss"])
     run_forward_backward.assert_called_once()
+    engine._dist_moe_runtime.begin_overflow_check.assert_called_once_with()
 
 
 def test_replay_failure_propagates_from_engine():
