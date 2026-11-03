@@ -49,6 +49,9 @@ from torchtitan_recipes.tests.models.qwen3 import (
     qwen3_debugmodel,
     qwen3_debugmodel_moe_param_groups,
 )
+from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
+    qwen38_flash_next_debugmodel_mm,
+)
 
 from tests.integration_tests import IntegrationTestDefinition
 
@@ -643,6 +646,14 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
     models.
     """
     return [
+        IntegrationTestDefinition(
+            configs=[qwen38_flash_next_debugmodel_mm],
+            test_descr="Qwen3.8-Flash-Next image fusion, PLE and sparse attention with FSDP",
+            test_name="qwen3_8_flash_next_mm_fsdp",
+            ngpu=2,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_fsdp2_tp2_cp2],
             test_descr="Llama 3 FSDP+TP+CP",

@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Mapping
-from typing import Protocol
 
 from . import attention as _attention, mla as _mla
 from .attention import (  # noqa: F401
@@ -31,15 +30,9 @@ from .attention import (  # noqa: F401
 from .linear_attention import LinearAttention, LinearAttentionMetadata
 from .mla import materialize_mla_kv, MLAAttention  # noqa: F401
 
-
-class AnnotatedAttentionMetadata(Protocol):
-    """Input metadata whose tensors participate in the model's SPMD contract."""
-
-    def annotate_spmd_types(self) -> None:
-        ...
-
-
-AttentionMetadata = FlexAttentionMetadata | AnnotatedAttentionMetadata
+AttentionMetadata = (
+    FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata
+)
 AttentionMetadataMap = Mapping[type[InnerAttention], AttentionMetadata]
 
 __all__ = [
@@ -47,7 +40,6 @@ __all__ = [
     *_mla.__all__,
     "AttentionMetadata",
     "AttentionMetadataMap",
-    "AnnotatedAttentionMetadata",
     "LinearAttention",
     "LinearAttentionMetadata",
 ]
