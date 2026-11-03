@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, KVTransferConfig
+from vllm.distributed import get_world_group
 from vllm.exceptions import VLLMClientError
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
@@ -146,28 +149,29 @@ class VLLMEngine(GenerationEngine):
         generator_name: str,
         output_dir: str,
     ):
-        kv_transfer_config = config.kv_transfer_config
-        self._uses_mooncake_store = kv_transfer_config is not None
-        if kv_transfer_config is not None:
-            cache_prefix = kv_transfer_config.kv_connector_extra_config.get(
+        self._uses_mooncake_store = config.kv_transfer_config is not None
+        self._coordinate_mooncake = self._uses_mooncake_store and (
+            parallelism.tensor_parallel_degree * parallelism.data_parallel_degree > 1
+        )
+        if config.kv_transfer_config is not None:
+            if (
+                self._coordinate_mooncake
+                and config.kv_transfer_config.kv_connector_module_path
+                not in (
+                    None,
+                    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector",
+                )
+            ):
+                raise ValueError(
+                    "Multi-GPU Mooncake Store requires vLLM's built-in connector in "
+                    "user config. Titan installs its coordination adapter automatically; "
+                    "user-provided custom kv_connector_module_path values are not supported."
+                )
+            cache_prefix = config.kv_transfer_config.kv_connector_extra_config.get(
                 "cache_prefix"
             )
             if not isinstance(cache_prefix, str) or not cache_prefix.strip():
                 raise ValueError("Mooncake Store requires a non-empty cache_prefix")
-            if any(
-                degree != 1
-                for degree in (
-                    parallelism.tensor_parallel_degree,
-                    parallelism.data_parallel_degree,
-                    parallelism.expert_parallel_degree,
-                )
-            ):
-                raise ValueError(
-                    "Mooncake Store currently requires TP=DP=EP=1 per generator: "
-                    "external_launcher replicates schedulers, but asynchronous KV "
-                    "completion is not synchronized across them. Use num_generators "
-                    "for independent replicas."
-                )
             if reset_kv_cache_on_model_state_dict_load:
                 raise ValueError(
                     "Mooncake Store requires reset_kv_cache_on_model_state_dict_load=False: "
@@ -204,6 +208,7 @@ class VLLMEngine(GenerationEngine):
             gpu_memory_limit=gpu_memory_limit,
             max_num_batched_tokens=max_num_batched_tokens,
             seed=debug.seed,
+            generator_name=generator_name,
         )
         tp_degree = parallelism.tensor_parallel_degree
         stat_loggers = None
@@ -221,22 +226,6 @@ class VLLMEngine(GenerationEngine):
         self._engine = LLMEngine.from_engine_args(
             engine_args, stat_loggers=stat_loggers
         )
-        if kv_transfer_config is not None and kv_transfer_config.is_kv_producer:
-            scheduler = self._engine.engine_core.engine_core.scheduler
-            # Check resolved KV groups: a finer hash is safe for full attention,
-            # but hybrid partial tails need a save after the request finishes.
-            # TODO(acisseJZhong): remove when vLLM submits those saves on no-forward steps.
-            # https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/kv_connector_model_runner_mixin.py
-            if (
-                scheduler.cache_config.enable_prefix_caching
-                and scheduler.mamba_partial_cache_hit
-            ):
-                raise ValueError(
-                    "Mooncake Store producers do not support hybrid partial-block "
-                    "prefix hits: vLLM can skip finish-time saves on zero-token "
-                    "steps, leaving GPU blocks pinned. Use full-block prefix "
-                    "matching instead of a finer prefix_match_unit."
-                )
         # Every rank holds the same blocks in its own scheduler; only the engine loop thread
         # touches them.
         self._session_kv_holder: VLLMSessionKVHolder | None = None
@@ -279,6 +268,7 @@ class VLLMEngine(GenerationEngine):
         gpu_memory_limit: float,
         max_num_batched_tokens: int | None,
         seed: int | None,
+        generator_name: str,
     ) -> EngineArgs:
         """Build the vLLM ``EngineArgs`` (see ``GenerationEngine`` for the arguments)."""
         enable_ep = parallelism.expert_parallel_degree > 1
@@ -341,6 +331,27 @@ class VLLMEngine(GenerationEngine):
         # - None: every full block boundary, as before v0.29. Blocks are still freed
         #   when the request moves past them; hashed ones stay reusable until evicted.
         engine_kwargs["prefix_cache_retention_interval"] = None
+        if self.config.kv_transfer_config is not None:
+            extra = dict(self.config.kv_transfer_config.kv_connector_extra_config)
+            # This option names an IPC socket, not a network port. Independent
+            # generators on the same host must not bind/unlink each other's socket.
+            extra.setdefault(
+                "lookup_rpc_port",
+                sha256(
+                    f"{extra['cache_prefix']}:{generator_name}".encode()
+                ).hexdigest()[:16],
+            )
+            engine_kwargs["kv_transfer_config"] = replace(
+                self.config.kv_transfer_config,
+                kv_connector_extra_config=extra,
+            )
+            if self._coordinate_mooncake:
+                engine_kwargs[
+                    "kv_transfer_config"
+                ].kv_connector_module_path = "torchtitan.rl.generator.vllm.mooncake"
+                engine_kwargs[
+                    "scheduler_cls"
+                ] = "torchtitan.rl.generator.vllm.mooncake.create_mooncake_scheduler"
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
@@ -435,11 +446,20 @@ class VLLMEngine(GenerationEngine):
                 # prompts); the high-level entry stays resilient to vLLM internals vs
                 # vllm.inputs.tokens_input.
                 [engine_input] = self._engine.renderer.render_cmpl([prompt])
-                # vLLM appends a random suffix to the id; the scheduler knows only that one.
+                sampling_params = _build_sampling_params(request.sampling)
+                if self._coordinate_mooncake:
+                    # titan_request_id is a copy of Titan's request.request_id,
+                    # shared by all TP ranks. vLLM may randomize its internal ID;
+                    # this metadata preserves the original ID so the scheduler
+                    # can match KV completions across ranks.
+                    sampling_params.extra_args = {
+                        "kv_transfer_params": {"titan_request_id": request.request_id}
+                    }
+                # Track vLLM's internal ID, which may include its random suffix.
                 internal_request_id = self._engine.add_request(
                     request_id=request.request_id,
                     prompt=engine_input,
-                    params=_build_sampling_params(request.sampling),
+                    params=sampling_params,
                     arrival_time=request.arrival_time,
                     priority=max(request.group_id, -1),
                 )
@@ -454,21 +474,46 @@ class VLLMEngine(GenerationEngine):
         return rejected_requests
 
     def has_unfinished_requests(self) -> bool:
-        """Whether any admitted request is still running."""
+        """Whether requests or their remaining KV work need more engine steps."""
+        if self._uses_mooncake_store:
+            return self._sync_unfinished_requests()
         return self._engine.has_unfinished_requests()
 
-    @property
-    def has_pending_work(self) -> bool:
-        if not self._uses_mooncake_store:
-            return False
+    def _has_unfinished_local_requests(self) -> bool:
         # LLMEngine tracks user outputs only; the in-process scheduler also tracks
         # finish-time saves and the completion steps that release their GPU blocks.
         # TODO(acisseJZhong): expose scheduler work through the public LLMEngine interface:
         # https://github.com/vllm-project/vllm/blob/main/vllm/v1/engine/llm_engine.py
-        return self._engine.engine_core.engine_core.scheduler.has_requests()
+        core = self._engine.engine_core.engine_core
+        return (
+            self._engine.output_processor.has_unfinished_requests()
+            or core.scheduler.has_requests()
+            or bool(core.batch_queue)
+        )
+
+    def _sync_unfinished_requests(self) -> bool:
+        # All ranks enter this check before stepping and use the result directly.
+        has_work = self._has_unfinished_local_requests()
+        if self._coordinate_mooncake:
+            work = torch.tensor(has_work, dtype=torch.int32)
+            dist.all_reduce(
+                work, op=dist.ReduceOp.MAX, group=get_world_group().cpu_group
+            )
+            has_work = bool(work.item())
+        return has_work
 
     def step(self) -> list[FinishedRequest]:
         """Run one engine step, a TP collective, and return the requests it finished."""
+        if self._coordinate_mooncake and self._engine.dp_group is not None:
+            core = self._engine.engine_core.engine_core
+            # Idle DP replicas must still join the EP forward. Include KV-only
+            # steps, which upstream executes as dummy forwards under DP.
+            self._engine.has_unfinished_requests_dp(core.scheduler.has_requests())
+            if self._engine.should_execute_dummy_batch:
+                self._engine.should_execute_dummy_batch = False
+                self._engine.engine_core.execute_dummy_batch()
+            # Continue into step even after a dummy forward: this DP replica may
+            # still have queued async outputs and KV completions to drain.
         with torch.no_grad():
             request_outputs = self._engine.step()
         if self._session_kv_holder is not None:
@@ -491,11 +536,21 @@ class VLLMEngine(GenerationEngine):
     def load_prefetched_model_state_dict(self, policy_version: int) -> None:
         """Copy the prefetched model state dict from pinned CPU memory into the model, and
         reset the KV cache when configured."""
-        if self._uses_mooncake_store and self.has_unfinished_requests():
-            raise RuntimeError(
-                "Mooncake Store requires drained weight updates: set "
-                "generator_router.hot_swap=False before loading weights"
-            )
+        if self._uses_mooncake_store:
+            # Every rank enters the weight-load boundary. Reject active generations
+            # together, but allow saves of already-computed, versioned KV to finish.
+            has_requests = self._engine.output_processor.has_unfinished_requests()
+            if self._coordinate_mooncake:
+                active = torch.tensor(has_requests, dtype=torch.int32)
+                dist.all_reduce(
+                    active, op=dist.ReduceOp.MAX, group=get_world_group().cpu_group
+                )
+                has_requests = bool(active.item())
+            if has_requests:
+                raise RuntimeError(
+                    "Mooncake Store requires drained weight updates: set "
+                    "generator_router.hot_swap=False before loading weights"
+                )
         model = self._get_model()
         model.load_state_dict(model._prefetched_model_state_dict)
         self._loaded_policy_version = policy_version

@@ -79,17 +79,11 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @abc.abstractmethod
     def has_unfinished_requests(self) -> bool:
-        """Whether any admitted request is still running."""
+        """Whether requests or their remaining engine work need more steps.
 
-    @property
-    def has_pending_work(self) -> bool:
-        """Whether this rank needs steps after request outputs finish (e.g. cache I/O).
-
-        This query must be noncollective: rank 0 also uses it to decide whether
-        to wait for new work. Engines with replicated schedulers must synchronize
-        background work before exposing it through this property.
+        All ranks must call this together before stepping: implementations may
+        synchronize local work so every rank makes the same continue/idle decision.
         """
-        return False
 
     @abc.abstractmethod
     def step(self) -> list[FinishedRequest]:

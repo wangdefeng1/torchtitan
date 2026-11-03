@@ -2,23 +2,20 @@
 
 Titan RL uses vLLM's
 [`MooncakeStoreConnector`](https://docs.vllm.ai/en/latest/features/mooncake_store_connector_usage/)
-to share prompt and optional decode KV through a CPU DRAM pool. Each generator keeps
-its local GPU cache and can load shared KV after a router repin. Cache misses
-recompute from the request's full token history.
+to share prompt and optional decode KV across generators through a distributed
+CPU DRAM pool. Generators keep their local GPU cache; misses recompute from the
+request's full token history.
 
-Mooncake Master tracks metadata; Store manages CPU capacity and eviction;
-Transfer Engine moves KV; vLLM manages GPU blocks. This integration requires no
-prefill/decode disaggregation. The separate
+Store manages CPU capacity and eviction; vLLM manages GPU blocks. The shared pool
+works without prefill/decode disaggregation. The separate
 [`MooncakeConnector`](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/mooncake_connector.py)
-provides point-to-point prefill/decode transfers, not a shared cache pool.
+handles point-to-point prefill/decode transfers.
 
 ## Setup
 
-Install a Mooncake SDK compatible with your vLLM build on each generator host.
-The smoke test used `mooncake-transfer-engine==0.3.13.post1`. RDMA requires working
-RNICs, GPU memory registration, and the SDK's native libraries.
-
-Start a reachable Master outside the RL job:
+Install a compatible Mooncake SDK on each generator host (tested:
+`mooncake-transfer-engine==0.3.13.post1`). RDMA requires RNICs, GPU memory
+registration, and the SDK's native libraries. Start a reachable Master for metadata:
 
 ```bash
 mooncake_master --rpc_port=50051
@@ -39,24 +36,20 @@ Set `MOONCAKE_CONFIG_PATH` in every generator process to a local JSON file:
 }
 ```
 
-`global_segment_size` is DRAM contributed **per worker**: four workers at 8 GB
-use 32 GB of their host's DRAM. Reserve memory for weight-prefetch buffers and other
-processes. `enable_offload` controls the disk tier; leave it `false` for CPU-only
-KV offload. vLLM loads and validates the Store configuration.
+- `global_segment_size` is DRAM **per worker**: four workers at 8 GB use 32 GB.
+  Leave room for weight-prefetch buffers and other host processes.
+- `enable_offload` controls the **disk tier**; CPU offload works with `false`.
 
-The devgpu test used these environment overrides; adapt them to your host:
+Host-specific settings used in the RDMA test:
 
-- `expandable_segments:False` in both `PYTORCH_ALLOC_CONF` and
-  `PYTORCH_CUDA_ALLOC_CONF`, set before importing PyTorch to override Titan's
-  `True` defaults. Expandable allocations have not been validated.
-- `WITH_NVIDIA_PEERMEM=0` for the tested SDK's NVIDIA DMA-BUF registration
-  path. Other SDKs or `nvidia-peermem` deployments may differ.
-- `VLLM_HOST_IP=127.0.0.1` for the single-host test. Override auto-detection
-  only when needed; multi-host deployments require a routable address per host.
+- Set `expandable_segments:False` in both `PYTORCH_ALLOC_CONF` and
+  `PYTORCH_CUDA_ALLOC_CONF` before importing PyTorch. Expandable allocations
+  have not been validated.
+- Set `WITH_NVIDIA_PEERMEM=0` for the tested SDK's DMA-BUF path.
+- Set `VLLM_HOST_IP` only if auto-detection fails. Use a routable address for
+  multiple hosts; `127.0.0.1` was used for the single-host test.
 
 ## Generator configuration
-
-Use native vLLM configuration in the RL recipe:
 
 ```python
 from vllm.config import KVTransferConfig
@@ -77,68 +70,145 @@ engine = VLLMEngine.Config(
 generator_router = InterGeneratorRouter.Config(hot_swap=False)
 ```
 
-- Share one `cache_prefix` across compatible generators, and choose a **new prefix
-  for every run or restart**, including checkpoint resume. Titan checks only
-  that it is non-empty; the caller ensures uniqueness and matching model, dtype,
-  and KV layout.
+- Use a shared, non-empty `cache_prefix` that is **new for each run or restart**,
+  including checkpoint resume. Generators sharing KV must match model, dtype,
+  KV layout, runtime versions, and hash settings, including any `PYTHONHASHSEED`
+  override. Prefix caching and hashing otherwise use vLLM defaults.
 - `kv_both` enables reads and writes; `save_decode_cache=True` also saves generated
-  KV blocks. These are recommended for multi-turn reuse, not enforced. Other
-  native roles and save options pass through; decode saving defaults to `False`
-  in the tested build.
-- Prefix caching and hashing use vLLM defaults (enabled for supported models,
-  `sha256` in the tested build). Keep runtime versions, hash settings, and any
-  `PYTHONHASHSEED` override consistent across generators sharing KV.
+  KV. Other native roles and save options pass through.
 
 ## Weight and cache lifecycle
 
-Trainer weights must load before the first request. Titan salts cache hashes with
-each generator's **loaded policy version**, even if the rollout began at an older
-version. The controller waits for all generators to load a snapshot before the
-trainer publishes the next, so a version identifies the same weights everywhere.
-
-Set `generator_router.hot_swap=False`: updates drain in-flight model calls,
-not entire multi-turn rollouts. Loading weights with unfinished requests raises.
-Keep `reset_kv_cache_on_model_state_dict_load=False`; asynchronous saves may still
-hold GPU blocks after a completion is returned. The engine continues stepping
-until those transfers finish and release their references.
-
-Versioned keys isolate old KV while leaving it available to replicas still using
-those weights; Store can evict it as needed. Do not call
-`reset_prefix_cache(reset_connector=True)` on one generator: it can clear the
-shared Store globally.
+- Load trainer weights before the first request. Titan includes the **loaded
+  policy version** in cache keys so weight updates cannot reuse stale KV.
+- Keep `generator_router.hot_swap=False` to drain model calls before weight
+  updates, and `reset_kv_cache_on_model_state_dict_load=False`: asynchronous saves
+  can still hold GPU blocks after a response. The engine drains pending transfers.
+- Old policy entries remain available until Store evicts them. Do not call
+  `reset_prefix_cache(reset_connector=True)` on a replica; it can clear the
+  shared Store globally.
 
 ## Supported configurations
 
-- **One GPU per generator (`TP=DP=EP=1`).** Scale with `num_generators`.
-  Multi-GPU support needs coordinated lookup results and transfer completion
-  across replicated schedulers.
-- **Direct `MooncakeStoreConnector` only.** `MultiConnector` and other connectors
-  are rejected; `kv_transfer_config=None` disables the connector.
-- With prefix caching enabled, Store producers reject **hybrid partial-block
-  hits**: vLLM can skip finish-time tail saves and leave GPU blocks pinned. Use
-  full-block matching for hybrid models; a `prefix_match_unit` finer than the
-  Mamba block size can trigger this path. Consumers and full-attention models
-  are unaffected.
-- `session_kv_holder` can retain local GPU KV. Releasing a session drops its held
-  GPU references, not shared Store entries; the connector does not manage sessions.
-- Batch-invariant mode is unsupported because it requires cache resets on weight
-  load. Standalone `generate.py` still needs checkpoint namespacing and pending-save
-  draining before it can use Store.
+- **Multi-GPU:** Titan's TP and DP/EP layouts are supported. TP ranks coordinate
+  KV lookup and completion using shared logical request IDs while retaining
+  rank-local vLLM IDs; DP groups coordinate progress. Use `num_generators` for
+  independent replicas.
+- **Connector:** direct `MooncakeStoreConnector` only; multi-GPU mode requires
+  vLLM's built-in implementation. `kv_transfer_config=None` disables it.
+- **Sessions:** `session_kv_holder` retains local GPU KV; releasing it does not
+  remove shared Store entries.
+- **Unsupported:** `MultiConnector`, other connectors, batch-invariant mode,
+  and standalone `generate.py`.
+
+## Multi-GPU coordination
+
+With `external_launcher`, each GPU process runs a scheduler and a worker.
+Asynchronous cache events can arrive at different times on each rank, so Titan
+coordinates two scopes within a generator:
+
+| Scope | What stays coordinated | Implementation |
+| --- | --- | --- |
+| **One TP group** | Request order, cache lookup results, transfer completion, and GPU block release for the same requests. | [mooncake.py](mooncake.py) |
+| **All ranks in a generator** | Whether to keep stepping or wait; participation in EP forwards across DP replicas. | [engine.py](engine.py), [engine_loop.py](../engine_loop.py) |
+
+Independent generators share the Store but do not join these collectives.
+
+### Cache reuse within a TP group
+
+Cache-hit flow for `TP=2` within one DP replica. The leader's lookup service
+checks all required TP shards. If loading is needed, each worker loads its own
+shard from the Store.
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 20, "rankSpacing": 24, "padding": 8}}}%%
+flowchart TB
+    L["1. Leader: lookup<br/>Broadcast result + LoadSpec"]
+
+    subgraph R0["Rank 0 / GPU 0"]
+        P0["2. Scheduler 0<br/>Allocate GPU blocks<br/>Build load metadata"]
+        W0["3. Worker 0: load shard 0"]
+    end
+    subgraph R1["Rank 1 / GPU 1"]
+        P1["2. Scheduler 1<br/>Allocate GPU blocks<br/>Build load metadata"]
+        W1["3. Worker 1: load shard 1"]
+    end
+
+    G["4. all_gather reports<br/>Each scheduler aggregates<br/>and applies matching updates"]
+
+    L --> P0 --> W0 --> G
+    L --> P1 --> W1 --> G
+
+    style R0 fill:#fffde7,stroke:#b59b32,color:#333
+    style R1 fill:#fffde7,stroke:#b59b32,color:#333
+```
+
+- **Lookup and allocation:** `LoadSpec` describes cached token ranges and tail
+  boundaries. Each scheduler then allocates destination GPU blocks and adds their
+  local IDs to its worker's load metadata. Pending lookups retry on later steps.
+- **Completion:** reports may be empty while transfers are in flight. Each
+  scheduler accumulates reports across steps, waiting for all required TP workers
+  before completing a load or releasing a save job's GPU references. Collectives
+  exchange metadata only; KV tensors move between each worker and the Store.
+- **Request IDs:** request completion reports use shared Titan IDs for aggregation,
+  then map back to each scheduler's local vLLM IDs before updating its request state.
+
+### Progress across DP/EP ranks
+
+Each DP replica has its own requests, TP group, and lookup service. Cache hits and
+completion counts stay within that TP group. In Titan's supported layouts,
+`DP>1` supplies ranks for EP, so replicas still need to participate in the same
+model forwards.
+
+At a common step boundary, all generator ranks use an `all_reduce(MAX)` over
+whether requests, scheduler work, or queued outputs remain. If any rank has
+work, all continue stepping; idle DP replicas join required EP forwards with
+dummy batches. This also drains KV saves after the last response, before the
+generator waits for new requests.
 
 ## Validation
 
-Select two idle RDMA-capable GPUs with `CUDA_VISIBLE_DEVICES` (numeric IDs or UUIDs)
-and run from the repository root:
+Select idle RDMA-capable GPUs with `CUDA_VISIBLE_DEVICES` and run from the repo
+root. The full matrix needs eight GPUs; use `-k 'not tp2 and not dp2'` for two.
 
 ```bash
 RUN_MOONCAKE_TEST=1 pytest -s tests/rl/unit_tests/gpu/test_mooncake_store.py
 ```
 
-The test starts a temporary Master and two generators. It checks cross-generator
-and next-turn reuse, policy-version isolation, prompt/decode saving, connector
-roles, and session retention. It verifies GPU selection and covers 256-token
-blocks. This is functional validation; multi-node performance and session-driven
-Store eviction remain follow-ups.
+Tests cover shared KV reuse, policy-version isolation, TP/DP/EP coordination,
+and hybrid partial-tail saves after the last request finishes.
+Multi-node operation and CUDA graphs remain unvalidated.
 
-See the [Store setup guide](https://docs.vllm.ai/en/latest/features/mooncake_store_connector_usage/)
-and [architecture overview](https://vllm.ai/blog/2026-05-06-mooncake-store).
+### Local performance sample
+
+Tested on one host with eight H100s: a two-GPU FSDP=2 trainer and six independent
+single-GPU generators, using the random-init Qwen3.5 debug model (8 layers,
+dim 256, BF16). Store used 1 GiB of DRAM per worker; disk offload and CUDA graphs
+were disabled.
+
+The synthetic workload used four prompts with two samples each per training
+step. Each rollout had four turns: 1024 initial tokens, 32 generated tokens per
+turn, and 192 new input tokens between turns. Fixed routing sent each turn to a
+different generator, with local prefix caching enabled in both OFF and ON. This left
+75% of requests with no local cache hit.
+
+Three OFF/ON pairs ran 12 training steps each. Results below summarize steps
+3-12 (320 requests per run), taking the median across runs for each metric.
+
+| Metric | Mooncake OFF | Mooncake ON |
+| --- | ---: | ---: |
+| Requests reusing Store KV | 0 | 244 / 320 |
+| Prefill tokens computed | 353,280 | 132,608 |
+| Mean prefill interval | 65.6 ms | 52.9 ms |
+| Mean queued interval | 1.5 ms | 32.6 ms |
+| Rollout throughput | 1.620/s | 1.613/s |
+| Total time for 10 training steps | 49.39 s | 49.58 s |
+
+Store reuse reduced prefill token computation by 62.5%, but did not produce a
+consistent end-to-end speedup: paired total-time changes ranged from -1.6% to
++2.3%. Queued time includes waiting for asynchronous KV lookup/load; the prefill
+interval runs from first scheduling to first token, not just GPU compute. These
+single-host, short-context debug-model results do not establish production
+performance.
+
+See the [architecture overview](https://vllm.ai/blog/2026-05-06-mooncake-store).

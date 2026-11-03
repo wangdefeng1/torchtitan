@@ -286,6 +286,9 @@ class EngineLoop:
         pending_engine_requests: list[EngineRequest] = []
         # Loop state (rank 0): model state dict loads taken off the queue but not yet applied.
         pending_load_messages: list[ModelStateDictLoadMessage] = []
+        # The last all-rank step check. A burst ending after a step stays awake
+        # until the next check confirms that requests and cleanup have drained.
+        has_unfinished_requests = False
         try:
             # One-time dispatcher setup before the loop starts.
             self._request_dispatcher.setup()
@@ -293,7 +296,9 @@ class EngineLoop:
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
                 decision = (
                     await self._decide_next_action(
-                        pending_engine_requests, pending_load_messages
+                        pending_engine_requests,
+                        pending_load_messages,
+                        has_unfinished_requests=has_unfinished_requests,
                     )
                     if self._rank == 0
                     else None
@@ -365,10 +370,8 @@ class EngineLoop:
                 # new requests and avoid a prefill in between every engine decode step, which is inefficient.
                 with sl.log_trace_span("vllm_engine_step_burst"):
                     for _ in range(self._max_engine_steps_between_decisions):
-                        if not (
-                            self._engine.has_pending_work
-                            or self._engine.has_unfinished_requests()
-                        ):
+                        has_unfinished_requests = self._engine.has_unfinished_requests()
+                        if not has_unfinished_requests:
                             break
                         finished_requests = self._engine.step()
                         self._request_dispatcher.process_finished_requests(
@@ -403,6 +406,8 @@ class EngineLoop:
         self,
         pending_engine_requests: list[EngineRequest],
         pending_load_messages: list[ModelStateDictLoadMessage],
+        *,
+        has_unfinished_requests: bool,
     ) -> LoopDecision:
         """RANK 0: takes everything off the queue and picks the next action. Sleeps until there is
         something to do.
@@ -417,7 +422,7 @@ class EngineLoop:
         messages: list[EngineLoopMessage]
         if (
             self._request_dispatcher.rank0_has_outstanding_generations()
-            or self._engine.has_pending_work
+            or has_unfinished_requests
         ):
             messages = []
         else:

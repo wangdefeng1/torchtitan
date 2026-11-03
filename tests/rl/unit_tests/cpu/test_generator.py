@@ -95,6 +95,7 @@ class _FakeLLMEngine:
         self.add_requests = []
         self.reset_prefix_cache_calls = []
         self.renderer = _FakeRenderer()
+        self.output_processor = SimpleNamespace(has_unfinished_requests=lambda: False)
 
     def add_request(self, *args, **kwargs):
         self.add_requests.append((args, kwargs))
@@ -148,6 +149,7 @@ def _vllm_engine(
     engine._engine = _FakeLLMEngine()
     engine.config = VLLMEngine.Config(kv_transfer_config=kv_transfer_config)
     engine._uses_mooncake_store = kv_transfer_config is not None
+    engine._coordinate_mooncake = False
     engine._loaded_policy_version = None
     engine._reset_kv_cache_on_model_state_dict_load = (
         reset_kv_cache_on_model_state_dict_load
@@ -576,7 +578,7 @@ def test_mooncake_shared_cache_uses_loaded_weights_not_group_version():
 def test_mooncake_rejects_weight_swap_during_generation():
     model = SimpleNamespace(load_state_dict=Mock(), _prefetched_model_state_dict={})
     engine = _vllm_engine(model=model, kv_transfer_config=_mooncake_transfer_config())
-    engine._engine.has_unfinished_requests = lambda: True
+    engine._engine.output_processor.has_unfinished_requests = lambda: True
     with pytest.raises(RuntimeError, match="hot_swap=False"):
         engine.load_prefetched_model_state_dict(2)
     model.load_state_dict.assert_not_called()
@@ -712,22 +714,17 @@ def test_qwen36_27b_perf_config():
 
 
 def _build_engine_kwargs(
-    monkeypatch, tmp_path, config: Generator.Config, *, scheduler=None
+    monkeypatch,
+    tmp_path,
+    config: Generator.Config,
+    *,
+    generator_name="generator",
 ) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
     ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
     engine_args = Mock()
     monkeypatch.setattr(vllm_engine_module, "EngineArgs", engine_args)
-    llm_engine = Mock()
-    llm_engine.from_engine_args.return_value.engine_core.engine_core.scheduler = (
-        scheduler
-        if scheduler is not None
-        else SimpleNamespace(
-            cache_config=SimpleNamespace(enable_prefix_caching=True),
-            mamba_partial_cache_hit=False,
-        )
-    )
-    monkeypatch.setattr(vllm_engine_module, "LLMEngine", llm_engine)
+    monkeypatch.setattr(vllm_engine_module, "LLMEngine", Mock())
     monkeypatch.setattr(vllm_engine_module, "register_to_vllm", Mock())
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     config.engine.build(
@@ -743,7 +740,7 @@ def _build_engine_kwargs(
         debug=config.debug,
         reset_kv_cache_on_model_state_dict_load=False,
         rank=0,
-        generator_name="generator",
+        generator_name=generator_name,
         output_dir=str(tmp_path),
     )
     return engine_args.call_args.kwargs
@@ -790,12 +787,64 @@ def test_mooncake_engine_args_and_namespace(monkeypatch, tmp_path):
     resolved = kwargs["kv_transfer_config"]
     assert resolved.kv_connector == "MooncakeStoreConnector"
     assert resolved.kv_role == "kv_both"
+    assert resolved.kv_connector_extra_config.pop("lookup_rpc_port")
     assert resolved.kv_connector_extra_config == {
         "cache_prefix": "run-1",
         "save_decode_cache": True,
         "load_async": False,
     }
     assert transfer == original
+
+
+@pytest.mark.parametrize("tp", [1, 2])
+def test_mooncake_lookup_sockets_are_generator_local(monkeypatch, tmp_path, tp):
+    transfer = _mooncake_transfer_config()
+    config = Generator.Config(
+        model=_MODEL_CONFIG,
+        parallelism=InferenceParallelismConfig(tensor_parallel_degree=tp),
+        engine=VLLMEngine.Config(kv_transfer_config=transfer),
+    )
+    first = _build_engine_kwargs(monkeypatch, tmp_path, config, generator_name="first")
+    second = _build_engine_kwargs(
+        monkeypatch, tmp_path, config, generator_name="second"
+    )
+    first_extra = first["kv_transfer_config"].kv_connector_extra_config
+    second_extra = second["kv_transfer_config"].kv_connector_extra_config
+    assert first_extra["lookup_rpc_port"] != second_extra["lookup_rpc_port"]
+    assert "lookup_rpc_port" not in transfer.kv_connector_extra_config
+    transfer.kv_connector_extra_config["lookup_rpc_port"] = 4321
+    explicit = _build_engine_kwargs(monkeypatch, tmp_path, config)
+    assert (
+        explicit["kv_transfer_config"].kv_connector_extra_config["lookup_rpc_port"]
+        == 4321
+    )
+
+
+def test_mooncake_does_not_silently_replace_custom_connector(monkeypatch, tmp_path):
+    transfer = _mooncake_transfer_config()
+    transfer.kv_connector_module_path = "custom.mooncake_connector"
+    config = Generator.Config(
+        model=_MODEL_CONFIG,
+        engine=VLLMEngine.Config(kv_transfer_config=transfer),
+    )
+    single = _build_engine_kwargs(monkeypatch, tmp_path, config)
+    assert (
+        single["kv_transfer_config"].kv_connector_module_path
+        == transfer.kv_connector_module_path
+    )
+
+    config.parallelism.tensor_parallel_degree = 2
+    with pytest.raises(ValueError, match="custom kv_connector_module_path"):
+        _build_engine_kwargs(monkeypatch, tmp_path, config)
+
+    # An explicit path to the built-in implementation is still the native connector.
+    transfer.kv_connector_module_path = (
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector"
+    )
+    coordinated = _build_engine_kwargs(monkeypatch, tmp_path, config)
+    assert coordinated["kv_transfer_config"].kv_connector_module_path == (
+        "torchtitan.rl.generator.vllm.mooncake"
+    )
 
 
 @pytest.mark.parametrize(
@@ -819,49 +868,6 @@ def test_mooncake_passthrough_rejects_unsafe_settings(
     )
     with pytest.raises(ValueError, match=match):
         _build_engine_kwargs(monkeypatch, tmp_path, config)
-
-
-@pytest.mark.parametrize("degree", ["tensor_parallel_degree", "data_parallel_degree"])
-def test_mooncake_rejects_replicated_schedulers(monkeypatch, tmp_path, degree):
-    config = Generator.Config(
-        model=_MODEL_CONFIG,
-        engine=VLLMEngine.Config(kv_transfer_config=_mooncake_transfer_config()),
-    )
-    setattr(config.parallelism, degree, 2)
-    with pytest.raises(ValueError, match="TP=DP=EP=1"):
-        _build_engine_kwargs(monkeypatch, tmp_path, config)
-
-
-@pytest.mark.parametrize(
-    "role, partial_hits, prefix_caching, rejected",
-    [
-        ("kv_both", True, True, True),
-        ("kv_producer", True, True, True),
-        ("kv_consumer", True, True, False),
-        ("kv_both", False, True, False),
-        ("kv_both", True, False, False),
-        (None, True, True, False),
-    ],
-)
-def test_mooncake_rejects_hybrid_partial_tail_saves(
-    monkeypatch, tmp_path, role, partial_hits, prefix_caching, rejected
-):
-    transfer = _mooncake_transfer_config() if role is not None else None
-    if transfer is not None:
-        transfer.kv_role = role
-    config = Generator.Config(
-        model=_MODEL_CONFIG,
-        engine=VLLMEngine.Config(kv_transfer_config=transfer),
-    )
-    scheduler = SimpleNamespace(
-        cache_config=SimpleNamespace(enable_prefix_caching=prefix_caching),
-        mamba_partial_cache_hit=partial_hits,
-    )
-    if rejected:
-        with pytest.raises(ValueError, match="hybrid partial-block prefix hits"):
-            _build_engine_kwargs(monkeypatch, tmp_path, config, scheduler=scheduler)
-    else:
-        _build_engine_kwargs(monkeypatch, tmp_path, config, scheduler=scheduler)
 
 
 @pytest.mark.parametrize(

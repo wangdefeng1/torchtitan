@@ -107,8 +107,7 @@ def generate() -> None:
             "generate.py runs vLLM; set generator.engine to VLLMEngine.Config, "
             f"got {type(engine_config).__qualname__}"
         )
-    kv_transfer_config = engine_config.kv_transfer_config
-    if kv_transfer_config is not None:
+    if engine_config.kv_transfer_config is not None:
         raise ValueError(
             "generate.py does not yet support Mooncake Store: it needs "
             "checkpoint-specific cache isolation and asynchronous KV-save draining. "
@@ -164,7 +163,6 @@ def generate() -> None:
         # Memory and performance
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=engine_config.cuda_graph.mode == "NONE",
-        kv_transfer_config=kv_transfer_config,
         attention_config=AttentionConfig(
             backend=vllm_attention_backend(model_config),
         ),

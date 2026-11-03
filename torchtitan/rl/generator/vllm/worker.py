@@ -9,11 +9,13 @@
 from collections.abc import Set
 from contextlib import nullcontext
 
-from vllm.config import CUDAGraphMode, get_layers_from_vllm_config
-from vllm.forward_context import BatchDescriptor
+from vllm.config import CUDAGraphMode, get_layers_from_vllm_config, VllmConfig
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.utils.math_utils import round_up
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
@@ -81,6 +83,26 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
 
 class TorchTitanGPUModelRunner(GPUModelRunner):
     """V1 runner with sequence-parallel padding and linear attention (GDN/KDA) decode specialization."""
+
+    @staticmethod
+    def kv_connector_no_forward(
+        scheduler_output: SchedulerOutput, vllm_config: VllmConfig
+    ) -> ModelRunnerOutput:
+        transfer = vllm_config.kv_transfer_config
+        if transfer is None or transfer.kv_connector != "MooncakeStoreConnector":
+            return GPUModelRunner.kv_connector_no_forward(scheduler_output, vllm_config)
+
+        # TODO(acisseJZhong): upstream finish-time saves on no-forward steps.
+        # https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/kv_connector_model_runner_mixin.py
+        # Mooncake's wait_for_save submits asynchronous jobs, including hybrid
+        # tails pinned after the last forward. Keep its CUDA-event ordering and
+        # completion polling before clearing this step's connector metadata.
+        with (
+            set_forward_context(None, vllm_config),
+            GPUModelRunner.maybe_get_kv_connector_output(scheduler_output) as output,
+        ):
+            pass
+        return ModelRunnerOutput.with_kv_conn_output_only(output)
 
     def load_model(self, load_dummy_weights: bool = False) -> None:
         super().load_model(load_dummy_weights)
