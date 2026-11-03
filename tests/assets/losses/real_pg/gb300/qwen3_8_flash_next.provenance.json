@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "purpose": "Strict numerical regression of the reduced Flash-Next training fixture on GB300 GPUs",
+  "golden_sha256": "9314e9e77420783e8dfddbae7ef6748bca1ffc723b235e371324d8904813bb57",
+  "source": {
+    "repository": "pytorch/torchtitan",
+    "upstream_base": "a87db08ea73cbdd567ceb055bd9118fd4a4507b2",
+    "computation_commit": "07d0138e3203ec872fa54f39e3cd2b135a5584ac",
+    "computation_url": "https://github.com/shuhuayu/torchtitan/commit/07d0138e3203ec872fa54f39e3cd2b135a5584ac",
+    "gdn_determinism_commit": "b2aca890400219473344c3e7042e0c926cabefba",
+    "files_sha256": {
+      "scripts/_checkpoint_test_config.py": "ca3c576d1a4080f2b3cdb38b84c263be692aa63346049a94ff43da399c650e53",
+      "scripts/loss_compare.py": "3773c8093311b691fe4c4aa6eaa425f5ea02b87fb180cd767a6c0acbbd25514c",
+      "tests/assets/c4_test/data.json": "07a274d2f6c903fd1c491260be302f99383930d31656f50de33ef467af6643b1",
+      "tests/assets/tokenizer/tokenizer.json": "a9eb477ec2c2520fa45c2e73078e930ca57d316fe8cce2f45842ac3cc48f5271",
+      "tests/assets/tokenizer/tokenizer_config.json": "acf745f72b6b8f4dd11ee38fa1931022978d408c0a3477495c8ab27086082697",
+      "tests/integration_tests/gb300.py": "0ec17d2a548fd940d50b4e909d1ebb4b87ab1a8bc5828f2158b241fe04f1a9e1",
+      "tests/integration_tests/run_tests.py": "2df6465cd03427f4aa0b35360465a0021de0c2d8d01d2bfb721264b00f61805f",
+      "torchtitan/models/common/attention/cp_gdn.py": "3773b38d4fffdc9472d7a45ab8453800253fbcbdd2a781b7be0278edb4c96baa",
+      "torchtitan/models/common/attention/gdn.py": "360cd8edb9180febd278704735c4f4554c795710b5af138aa154e2a6e281f41b",
+      "torchtitan/models/qwen3_8_flash_next/__init__.py": "6c24df602fabee22b1e94ed73a5b4de8098ea056d3e9e293a35bbddfa36b6e5e",
+      "torchtitan/models/qwen3_8_flash_next/attention.py": "df21f81a76c708d11996db408435d24ad7651667f73f21268113bdbc2a4708e4",
+      "torchtitan/models/qwen3_8_flash_next/embedding.py": "da8f44d879be58a4fd4ab419e4e8ed6f6aabe9f303a28694da4123e273807a79",
+      "torchtitan/models/qwen3_8_flash_next/flavors.py": "901394c766a9e4dbf6057b6e799463c9468a851b25fe910d7cc30d8fbc58f5b2",
+      "torchtitan/models/qwen3_8_flash_next/model.py": "84cdd5797afc6c2ff0b8d9c61c14a6db277dc50b7730aacebf1956315bb2d34b",
+      "torchtitan/models/qwen3_8_flash_next/moe.py": "d477467306c6b530c1fce2946be698cc4e150b0d6af8bae1cc5cb31f55ae4384",
+      "torchtitan/models/qwen3_8_flash_next/norm.py": "0c74fa03b653e0808ad0ae0946ff428fe38d604893a1735c5bff0bc659f1b62b",
+      "torchtitan/models/qwen3_8_flash_next/residual.py": "e32c770d27f500b3db6bc886aae37444b26c5dbb4845d179eb029836c5f5fad5",
+      "torchtitan/models/qwen3_8_flash_next/rope.py": "428427e9ccb005d0d4b00bece5253c86a6879baef64a50407140bb6c6db04d45",
+      "torchtitan/models/qwen3_8_flash_next/sharding.py": "8d052f96c29eb172e876702098972953996f3e18d831c3898995c2deb831edf6",
+      "torchtitan/models/qwen3_8_flash_next/state_dict_adapter.py": "6739237ca2f31339d5f480ea47586adaf2452d152db730c3c6292e69036b0d6b",
+      "torchtitan_recipes/tests/models/llama3.py": "142d683548bf91da99e82f066b8707c988b2e3ab16122535c808bbfce80c6c46",
+      "torchtitan_recipes/tests/models/qwen3_8_flash_next.py": "a67ecbf5b577ead75fd1e4fda86df71673ebdbd657ecb939ac90ddbbefb28405"
+    }
+  },
+  "reference": {
+    "architecture_checkpoint": "Qwen/Qwen3.8-Flash-Next",
+    "checkpoint_revision": "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+    "transformers_revision": "494470d677d05d44153d235d795e0d01040307ab"
+  },
+  "hardware": {
+    "gpu": "NVIDIA GB300",
+    "gpu_count": 2,
+    "allocated_gpu_count": 4,
+    "hosts": 1
+  },
+  "software": {
+    "torch": "2.16.0.dev20261030+cu132",
+    "torch_revision": "bf270c3251d8e84723cedbf5b60eaa60cacaa3f2",
+    "cuda": "13.2",
+    "python": "3.12.13",
+    "machine": "aarch64",
+    "packages": {
+      "torch": {
+        "version": "2.16.0.dev20261030+cu132"
+      },
+      "attn-gym": {
+        "version": "0.0.17"
+      },
+      "triton": {
+        "version": "3.9.0+gitb7ddcf86"
+      },
+      "transformers": {
+        "version": "5.21.0.dev0",
+        "vcs_commit": "494470d677d05d44153d235d795e0d01040307ab"
+      },
+      "torch-remat": {
+        "version": "0.2.2"
+      },
+      "spmd-types": {
+        "version": "0.3.1"
+      },
+      "nvidia-cutlass-dsl": {
+        "version": "4.8.1"
+      }
+    },
+    "nccl": [
+      2,
+      32,
+      3
+    ],
+    "runtime_archive_sha256": "5d6ed6915814b6f62de90e3bd48f65df70b508d05e166df6a833da46f98e5ab2"
+  },
+  "fixture": {
+    "module": "torchtitan_recipes.tests.models.qwen3_8_flash_next",
+    "config": "qwen38_flash_next_debugmodel_tp2",
+    "seed_config": "qwen38_flash_next_debugmodel",
+    "initialization": "Independently recreated random model-only FP32 seed checkpoint before each launch",
+    "steps": 10,
+    "metrics": [
+      "loss",
+      "grad_norm"
+    ],
+    "metric_storage": "Full-precision TensorBoard scalars with round-trip float text",
+    "grad_norm": "Global norm before clipping; max_norm=1.0",
+    "seed": 42,
+    "deterministic": true,
+    "deterministic_warn_only": false,
+    "parallelism": {
+      "fsdp": 1,
+      "tp": 2,
+      "ep": 2,
+      "sp": true,
+      "pp": 1,
+      "cp": 1
+    },
+    "training_dtype": "float32",
+    "parameter_dtype": "bfloat16",
+    "reduce_dtype": "float32",
+    "data": "tests/assets/c4_test/data.json; Grain, repeat=True, shuffle=False",
+    "tokenizer_assets": "tests/assets/tokenizer",
+    "seq_len": 64,
+    "tokens_per_microbatch_per_dp_rank": 128,
+    "optimizer": {
+      "name": "AdamW",
+      "fused": true,
+      "lr": 0.0008,
+      "betas": [
+        0.9,
+        0.95
+      ],
+      "eps": 1e-08,
+      "weight_decay": 0.1
+    },
+    "scheduler": {
+      "warmup_steps": 2,
+      "decay_type": "linear",
+      "decay_ratio": 0.8,
+      "min_lr_factor": 0.0
+    },
+    "indexer_loss_coeff": 1.0,
+    "moe_aux_loss_coeff": 0.001,
+    "activation_remat": null,
+    "local_compile_regions": [],
+    "accelerator_graphs_disabled": true,
+    "spmd_typechecking": true,
+    "qsa_attention": "SDPA MATH",
+    "gdn": "Attention Gym fused kernels with deterministic L2 normalization"
+  },
+  "qualification": {
+    "independent_remote_launches": 2,
+    "bitwise_metrics_per_launch": 20,
+    "registered_export_matches_both_independent_launches": true,
+    "export_command": "python -m tests.integration_tests.run_tests OUTPUT --test_suite gb300 --execution_mode real_pg --gpu_arch gb300 --ngpu 2 --test_name qwen3_8_flash_next_tp+ep_numerics --export-numerics",
+    "replay_command": "python -m tests.integration_tests.run_tests OUTPUT --test_suite gb300 --execution_mode real_pg --gpu_arch gb300 --ngpu 2 --test_name qwen3_8_flash_next_tp+ep_numerics"
+  }
+}

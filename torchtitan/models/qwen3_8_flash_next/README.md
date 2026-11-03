@@ -63,8 +63,8 @@ Zero gradients allow AdamW state/decay updates on entirely empty steps.
 
 ## Build and train
 
-Supported parallelism is FSDP, TP with or without sequence parallelism, and EP.
-PP and CP are rejected at config time. TP degree must divide the two QSA KV
+Supported parallelism is FSDP, TP with or without sequence parallelism, EP and
+real pipeline parallelism. CP and fake pipeline process groups are rejected. TP degree must divide the two QSA KV
 heads, so degrees 1 and 2 are supported.
 Flavors are `debugmodel`, `debugmodel_mm`, and `125B-A6B`.
 
@@ -104,6 +104,18 @@ NGPU=2 MODULE=torchtitan_recipes.tests.models.qwen3_8_flash_next \
   CONFIG=qwen38_flash_next_debugmodel_tp2 ./run_train.sh
 ```
 
+The eight-GPU recipe combines FSDP2, TP2, EP4 and PP2 with four virtual stages,
+Interleaved1F1B and full activation remat. PLE belongs to virtual stage 1, after
+token embedding. Stages exchange `[T, 4 * D]` and receive original token IDs and
+document positions independently of multimodal rotary coordinates. The final
+stage owns the stream mixer and LM head. The shared engine rejects SPMD
+typechecking under PP; the TP/EP recipe checks types separately.
+
+```bash
+NGPU=8 MODULE=torchtitan_recipes.tests.models.qwen3_8_flash_next \
+  CONFIG=qwen38_flash_next_debugmodel_all_parallelism ./run_train.sh
+```
+
 ## Numerical coverage
 
 The CPU tests cover residual/norm equations, hash and convolution boundaries,
@@ -126,6 +138,19 @@ image/video fusion in train/eval, including logits, masked CE, available paramet
 gradients, embeddings and pixels. BF16 gradient bounds are `atol=1e-4`,
 `rtol=0.03125`; standalone FP32 vision uses `atol=3e-6`, `rtol=3e-5`.
 Independent CPU feature equations provide the CPU coverage.
+
+The registered real-PG GB300 suite runs the TP2/EP2/SP fixture for ten steps
+and compares full-precision loss and gradient norm against its committed golden.
+[Golden provenance](../../../tests/assets/losses/real_pg/gb300/qwen3_8_flash_next.provenance.json)
+records the hardware, runtime, source and data hashes of the independent captures.
+Pipeline tests compare original-ID payloads and all stage parameter gradients
+with an unsplit model.
+
+```bash
+python -m tests.integration_tests.run_tests outputs/flash_next_numerics \
+  --test_suite gb300 --execution_mode real_pg --gpu_arch gb300 --ngpu 2 \
+  --test_name qwen3_8_flash_next_tp+ep_numerics
+```
 
 ## QSA memory and training limits
 
