@@ -26,7 +26,11 @@ TP = MeshAxisName.TP
 
 def unsharded_linear_sharding(layout: SpmdType) -> ShardingConfig:
     return ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        state_shardings={
+            "weight": dense_param_placement(
+                tp=spmd.I if layout.local_type[TP] == spmd.I else spmd.R
+            )
+        },
         in_src_shardings={"input": layout},
         out_src_shardings=layout,
     )
@@ -34,7 +38,11 @@ def unsharded_linear_sharding(layout: SpmdType) -> ShardingConfig:
 
 def grouped_norm_sharding(layout: SpmdType) -> ShardingConfig:
     return ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        state_shardings={
+            "weight": dense_param_placement(
+                tp=spmd.I if layout.local_type[TP] == spmd.I else spmd.R
+            )
+        },
         in_src_shardings={"x_TC": layout},
         out_src_shardings=layout,
         local_spmd=True,
@@ -83,13 +91,19 @@ def ngram_table_sharding() -> ShardingConfig:
     hashes = SpmdType(
         {DP: spmd.V, CP: spmd.V, TP: spmd.R}, spmd.PartitionSpec((DP, CP), None)
     )
+    output = SpmdType(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+        spmd.PartitionSpec((DP, CP), None, TP),
+    )
     replicated = SpmdType(
         {DP: spmd.V, CP: spmd.V, TP: spmd.R}, spmd.PartitionSpec((DP, CP), None, None)
     )
     return ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        # Feature shards gather the lookup vectors before the PLE projection.
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(1))},
         in_src_shardings={"input": hashes},
-        out_src_shardings=replicated,
+        out_src_shardings=output,
+        out_dst_shardings=replicated,
         local_spmd=True,
     )
 

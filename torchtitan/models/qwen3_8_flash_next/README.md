@@ -63,7 +63,9 @@ Zero gradients allow AdamW state/decay updates on entirely empty steps.
 
 ## Build and train
 
-Supported parallelism is FSDP. TP, EP, PP and CP are rejected at config time.
+Supported parallelism is FSDP, TP with or without sequence parallelism, and EP.
+PP and CP are rejected at config time. TP degree must divide the two QSA KV
+heads, so degrees 1 and 2 are supported.
 Flavors are `debugmodel`, `debugmodel_mm`, and `125B-A6B`.
 
 ```python
@@ -92,6 +94,15 @@ The multimodal integration entry consumes `qwen38_flash_next_debugmodel_mm` with
 image fusion, PLE and QSA at 1,024 tokens. The text fixture uses 64 tokens and ten
 training steps. Reduced fixtures retain both attention types and routed/shared
 experts.
+
+TP keeps residual/PLE state replicated, shards QSA heads and lexical feature
+columns, and reduces detached head probabilities before pooling each block. The
+replicated indexer contributes its KL gradient once across the TP ranks.
+
+```bash
+NGPU=2 MODULE=torchtitan_recipes.tests.models.qwen3_8_flash_next \
+  CONFIG=qwen38_flash_next_debugmodel_tp2 ./run_train.sh
+```
 
 ## Numerical coverage
 
@@ -150,7 +161,8 @@ teacher KL.
 
 - Dynamic selections require `training.disable_accelerator_graphs=True`.
 - The lexical table alone is about 95.4 GiB in BF16. FSDP shards persistent state
-  but gathers the complete table for its computation in this FSDP-only version.
+  and gathers its local TP feature shard for computation. At TP degree 2, each
+  rank materializes about 47.7 GiB of table weights before the lookup.
 - The meta inventory has 177.4B decoder/vision parameters including the lexical
   table. Full-checkpoint materialization and distributed conversion of that
   table are unqualified.
