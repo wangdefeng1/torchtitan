@@ -30,7 +30,10 @@ from torchtitan.models.common.linear import (
     Linear,
     RowParallelLinear,
 )
-from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+from torchtitan.models.common.vision_encoder import (
+    InvariantColumnParallelLinear,
+    InvariantRowParallelLinear,
+)
 
 
 class TestLinear(unittest.TestCase):
@@ -274,6 +277,40 @@ class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
         assert convert.call_args.kwargs["dst"] == spmd.P
         assert redistribute.call_args.kwargs["src"] == spmd.P
         assert redistribute.call_args.kwargs["dst"] == spmd.I
+
+    def test_vision_column_parallel_input_is_always_invariant(self):
+        input = torch.randn(3, 4)
+        tp_group = object()
+        linear = InvariantColumnParallelLinear.Config(
+            in_features=4,
+            out_features=2,
+            bias=True,
+        ).build()
+
+        for dense_sp_enabled in (False, True):
+            with self.subTest(dense_sp_enabled=dense_sp_enabled):
+                with (
+                    patch.object(
+                        linear_module,
+                        "spmd_mesh_group",
+                        return_value=tp_group,
+                    ),
+                    patch.object(
+                        linear_module,
+                        "spmd_dense_sp_enabled",
+                        return_value=dense_sp_enabled,
+                    ),
+                    patch.object(
+                        linear_module.spmd,
+                        "redistribute",
+                        side_effect=lambda tensor, *_args, **_kwargs: tensor,
+                    ) as redistribute,
+                ):
+                    linear(input)
+
+                # Vision activations stay TP-invariant even under decoder SP.
+                assert redistribute.call_args.kwargs["src"] == spmd.I
+                assert redistribute.call_args.kwargs["dst"] == spmd.R
 
 
 class TestBiasedRowParallelLinearDistributed(DTensorTestBase):
