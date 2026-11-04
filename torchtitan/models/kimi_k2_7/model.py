@@ -34,6 +34,7 @@ from torchtitan.models.common.multimodal import (
     build_dummy_vision_inputs,
     get_vision_positions,
     MultimodalModel,
+    replicated_to_residual_layout,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -300,6 +301,8 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             # The scatter restores a token-aligned tensor, so text-model DP
             # resumes as global batch sharding after the multimodal region.
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
+        if self.tok_embeddings is not None and self.tok_embeddings.replicate_output:
+            x = replicated_to_residual_layout(x)
 
         with spmd.no_typecheck():
             aux_loss_denominator = (

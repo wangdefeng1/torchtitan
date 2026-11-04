@@ -49,6 +49,7 @@ from torchtitan.models.common.multimodal import (
     gather_vision_embeds,
     get_vision_positions,
     MultimodalModel,
+    replicated_to_residual_layout,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -489,6 +490,8 @@ class KimiK3Model(MultimodalModel):
                 ),
             )
 
+        if self.tok_embeddings is not None and self.tok_embeddings.replicate_output:
+            h_TD = replicated_to_residual_layout(h_TD)
         if block_residual_TND is None:
             block_residual_TND = h_TD.unsqueeze(1)[:, :0]
         with spmd.no_typecheck():

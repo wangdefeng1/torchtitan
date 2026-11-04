@@ -21,7 +21,8 @@ from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 
 from .decoder import Decoder
 
@@ -253,3 +254,24 @@ def scatter_vision_embeds(
             f"the packed vision output contains {vision_embeds.shape[0]}."
         )
     return inputs_embeds
+
+
+def replicated_to_residual_layout(x_TD: torch.Tensor) -> torch.Tensor:
+    """Convert the TP-replicated multimodal stream to the decoder residual layout.
+
+    ``VocabParallelEmbedding(replicate_output=True)`` keeps the full sequence on
+    every TP rank so the vision scatter can write any position. After the
+    scatter, ``R -> Shard(0)`` under sequence parallelism is a local slice, and
+    ``R -> Invariant`` otherwise is a type change; neither communicates in
+    forward or backward. Returns ``x_TD`` unchanged without TP.
+    """
+    tp_group = spmd_mesh_group(MeshAxisName.TP)
+    if tp_group is None:
+        return x_TD
+    return spmd.redistribute(
+        x_TD,
+        tp_group,
+        src=spmd.R,
+        dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+        backward_options={"op_dtype": x_TD.dtype},
+    )
