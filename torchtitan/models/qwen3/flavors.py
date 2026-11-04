@@ -20,11 +20,11 @@ from torchtitan.config.transform import (
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     CosSinRoPE,
-    Embedding,
     Linear,
     RoPE,
     Softmax,
     TransformerBlock,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
@@ -230,7 +230,7 @@ def _debugmodel(
             ),
         ),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -280,7 +280,7 @@ def _0_6b(
             ),
         ),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -330,7 +330,7 @@ def _1_7b(
             ),
         ),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -380,7 +380,7 @@ def _4b(
             ),
         ),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -429,7 +429,7 @@ def _8b(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -478,7 +478,7 @@ def _14b(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -527,7 +527,7 @@ def _32b(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -582,7 +582,7 @@ def _debugmodel_moe(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -637,7 +637,7 @@ def _30b_a3b(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -692,7 +692,7 @@ def _235b_a22b(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,

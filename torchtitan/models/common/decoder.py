@@ -30,7 +30,7 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -324,7 +324,7 @@ class Decoder(BaseModel):
                 aux_loss_denominator=aux_loss_denominator,
             )
 
-        h = self.norm(h) if self.norm is not None else h
+        h = self._final_norm_and_gather(h)
 
         # _skip_lm_head is an attribute rather than a forward kwarg because PP backward
         # calls .requires_grad on all stage inputs, which fails on bool kwargs.
@@ -333,6 +333,18 @@ class Decoder(BaseModel):
             return h
         output = self.lm_head(h) if self.lm_head is not None else h
         return output
+
+    def _final_norm_and_gather(self, h: torch.Tensor) -> torch.Tensor:
+        """Apply the root norm and gather its output to TP-``Replicate``.
+
+        The vocab-sharded ``lm_head`` needs the full hidden states on every TP
+        rank. The gather runs once here, after the norm, rather than inside
+        ``lm_head``, which ``ChunkedLossWrapper`` calls once per chunk.
+        Pipeline stages without the root norm return ``h`` unchanged.
+        """
+        if self.norm is None:
+            return h
+        return maybe_gather_tp_input(self.norm, self.norm(h))
 
     def preprocess_inputs(
         self,

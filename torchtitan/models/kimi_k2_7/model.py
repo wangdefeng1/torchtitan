@@ -319,7 +319,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
                 aux_loss_denominator=aux_loss_denominator,
             )
 
-        x = self.norm(x) if self.norm is not None else x
+        x = self._final_norm_and_gather(x)
         if self._skip_lm_head:
             return x
         return self.lm_head(x) if self.lm_head is not None else x

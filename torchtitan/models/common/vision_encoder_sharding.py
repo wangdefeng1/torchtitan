@@ -12,7 +12,6 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
-    dense_activation_placement,
     dense_param_placement,
     replicated_activation_placement,
     token_id_placement,
@@ -59,7 +58,7 @@ def multimodal_input_sharding() -> dict[str, SpmdType]:
 
 
 def multimodal_token_embedding_sharding_config() -> ShardingConfig:
-    """Vocab-sharded token embedding whose output stays Replicate across TP.
+    """``VocabParallelEmbedding`` with ``replicate_output`` set.
 
     The vision scatter writes features at arbitrary sequence positions, so it
     needs the full embedding sequence on every TP rank; the first decoder layer
@@ -68,10 +67,7 @@ def multimodal_token_embedding_sharding_config() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": token_id_placement()},
-        in_dst_shardings={"input": token_id_placement()},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=replicated_activation_placement(),
-        local_spmd=True,
+        out_src_shardings=replicated_activation_placement(),
     )
 
 

@@ -20,12 +20,12 @@ from torchtitan.config.transform import (
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
-    Embedding,
     Linear,
     RMSNorm,
     Sigmoid,
     Softmax,
     TransformerBlock,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.decoder_sharding import (
@@ -334,10 +334,11 @@ def _debugmodel(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=enable_sp,
             sharding_config=_token_embedding_sharding(
                 enable_sp=enable_sp, multimodal=True
             ),
@@ -421,10 +422,11 @@ def _moonlight_16b_a3b_config(
         max_context_length=max_context_length,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=multimodal and enable_sp,
             sharding_config=_token_embedding_sharding(
                 enable_sp=enable_sp, multimodal=multimodal
             ),
@@ -559,10 +561,11 @@ def _kimi_k2_5(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=enable_sp,
             sharding_config=_token_embedding_sharding(
                 enable_sp=enable_sp, multimodal=True
             ),

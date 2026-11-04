@@ -517,7 +517,7 @@ class KimiK3Model(MultimodalModel):
             self.output_res_proj,
             self.output_res_norm,
         )
-        h_TD = self.norm(h_TD) if self.norm is not None else h_TD
+        h_TD = self._final_norm_and_gather(h_TD)
         if self._skip_lm_head:
             return h_TD
         return self.lm_head(h_TD) if self.lm_head is not None else h_TD

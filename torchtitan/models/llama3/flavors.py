@@ -20,11 +20,11 @@ from torchtitan.config.transform import (
 from torchtitan.models.common import (
     ComplexRoPE,
     compute_ffn_hidden_dim,
-    Embedding,
     Linear,
     RMSNorm,
     RoPE,
     TransformerBlock,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
@@ -135,7 +135,7 @@ def _debugmodel(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=2048,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=2048,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -189,7 +189,7 @@ def _1b(
         dim=dim,
         vocab_size=vocab_size,
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -248,7 +248,7 @@ def _3b(
         dim=dim,
         vocab_size=vocab_size,
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -306,7 +306,7 @@ def _8b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -362,7 +362,7 @@ def _70b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -418,7 +418,7 @@ def _405b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,

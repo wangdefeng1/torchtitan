@@ -21,7 +21,6 @@ from torchtitan.models.common import (
     BatchWiseLoadBalanceLoss,
     ColumnParallelLinear,
     CosSinRoPE,
-    Embedding,
     HiMidLoLinear,
     Linear,
     RMSNorm,
@@ -29,6 +28,7 @@ from torchtitan.models.common import (
     RowParallelLinear,
     Softmax,
     TransformerBlock,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.activation import ClampedSwiGLU
 from torchtitan.models.common.attention import (
@@ -304,7 +304,7 @@ def _debugmodel(
         max_context_length=seq_len,
         vocab_size=2048,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=2048,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -363,7 +363,7 @@ def _20b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=201088,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=201088,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -422,7 +422,7 @@ def _120b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=201088,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=201088,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,

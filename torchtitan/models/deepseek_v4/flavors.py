@@ -22,7 +22,6 @@ from torchtitan.config.transform import (
 from torchtitan.models.common import (
     ComplexRoPE,
     DenseFeedForward,
-    Embedding,
     FeedForward,
     HiMidLoLinear,
     LimitedSwiGLU,
@@ -32,6 +31,7 @@ from torchtitan.models.common import (
     RoPE,
     RowParallelLinear,
     SqrtSoftplus,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
@@ -824,7 +824,7 @@ def _debugmodel(
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -972,7 +972,7 @@ def _deepseek_v4_flash(
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -1120,7 +1120,7 @@ def _deepseek_v4_pro(
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,

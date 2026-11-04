@@ -20,7 +20,12 @@ from torchtitan.config.transform import (
 )
 
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common import ComplexRoPE, Embedding, Linear, RowParallelLinear
+from torchtitan.models.common import (
+    ComplexRoPE,
+    Linear,
+    RowParallelLinear,
+    VocabParallelEmbedding,
+)
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     QKVLinear,
@@ -364,7 +369,7 @@ def _muse_glimmer_config(
         # all-reduce happens before the scaleless norm (normalizing a Partial
         # sum would be wrong); the norm runs on the reduced activation.
         tok_embeddings=EmbeddingWithNorm.Config(
-            embedding=Embedding.Config(
+            embedding=VocabParallelEmbedding.Config(
                 num_embeddings=vocab_size,
                 embedding_dim=dim,
                 param_init=_EMBEDDING_INIT,

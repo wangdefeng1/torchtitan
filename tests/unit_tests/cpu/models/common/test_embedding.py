@@ -9,6 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
 from itertools import product
+from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
@@ -25,7 +26,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common import embedding as embedding_module
+from torchtitan.models.common.embedding import Embedding, VocabParallelEmbedding
 
 
 class TestEmbeddingConfig(unittest.TestCase):
@@ -300,6 +302,65 @@ class TestEmbedding(DTensorTestBase):
                     )
                     if not enable_sp:
                         self.assertTrue(torch.equal(local_output, full_output))
+
+    @with_comms
+    def test_vocab_parallel_embedding_reduces_output(self):
+        """VocabParallelEmbedding reduces its partial lookup to the TP output layout."""
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        tp_rank = dist.get_rank(mesh.get_group("tp"))
+
+        for vocab_size, (enable_sp, replicate_output) in product(
+            (128, 131),
+            ((False, False), (True, False), (True, True)),
+        ):
+            with self.subTest(
+                vocab_size=vocab_size,
+                enable_sp=enable_sp,
+                replicate_output=replicate_output,
+            ):
+                torch.manual_seed(42)
+                global_weight = torch.randn(vocab_size, 32, device=self.device_type)
+                tokens = torch.randint(0, vocab_size, (16,), device=self.device_type)
+                reference = nn.Embedding.from_pretrained(global_weight, freeze=False)
+                expected = reference(tokens)
+
+                embedding = VocabParallelEmbedding.Config(
+                    num_embeddings=vocab_size,
+                    embedding_dim=32,
+                    replicate_output=replicate_output,
+                ).build()
+                embedding.weight = nn.Parameter(
+                    distribute_tensor(global_weight, mesh, (Shard(0),)).to_local()
+                )
+                with (
+                    set_current_spmd_mesh(mesh),
+                    patch.object(
+                        embedding_module,
+                        "spmd_dense_sp_enabled",
+                        return_value=enable_sp,
+                    ),
+                ):
+                    output = embedding(tokens)
+                output.backward(torch.ones_like(output))
+
+                expected_output = expected
+                if enable_sp and not replicate_output:
+                    expected_output = expected.chunk(4)[tp_rank]
+                self.assertEqual(output, expected_output, atol=0, rtol=0)
+
+                # Summed over ranks, the local losses cover every token once.
+                expected.backward(torch.ones_like(expected))
+                expected_grad = reference.weight.grad
+                if replicate_output:
+                    # Each rank's loss covers every token, and the backward of
+                    # P -> R sums those partial gradients across TP ranks.
+                    expected_grad = expected_grad * 4
+                self.assertEqual(
+                    embedding.weight.grad,
+                    distribute_tensor(expected_grad, mesh, (Shard(0),)).to_local(),
+                    atol=0,
+                    rtol=0,
+                )
 
 
 if __name__ == "__main__":

@@ -23,13 +23,13 @@ from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     Conv1d,
     DenseFeedForward,
-    Embedding,
     GatedRMSNorm,
     HiMidLoLinear,
     Linear,
     RowParallelLinear,
     Sigmoid,
     SiTUGLU,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.attention import FlexInnerAttention, InnerAttention
 from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
@@ -662,10 +662,11 @@ def _kimi_k3_config(
         max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=multimodal,
             sharding_config=(
                 multimodal_token_embedding_sharding_config()
                 if multimodal

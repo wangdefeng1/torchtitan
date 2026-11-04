@@ -11,7 +11,7 @@ from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.models.common import Embedding, Linear
+from torchtitan.models.common import Linear, VocabParallelEmbedding
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
     pre_lm_head_norm_sharding_config,
@@ -63,7 +63,7 @@ def _qwen3_8_2_4t_a95b(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,

@@ -609,7 +609,7 @@ class MuseGlimmerModel(MultimodalModel):
                 positions,
             )
 
-        h_TD = self.norm(h_TD) if self.norm is not None else h_TD
+        h_TD = self._final_norm_and_gather(h_TD)
 
         # _skip_lm_head is an attribute (not a kwarg) because PP backward calls
         # .requires_grad on all stage inputs, which fails on bool kwargs.

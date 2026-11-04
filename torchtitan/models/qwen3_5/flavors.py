@@ -23,12 +23,12 @@ from torchtitan.models.base.sharding import ShardingConfig
 
 from torchtitan.models.common import (  # noqa: F401
     Conv1d,
-    Embedding,
     GatedRMSNorm,
     Linear,
     RowParallelLinear,
     SiLU,
     Softmax,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.attention.gdn import GDN, GDNKernel, InnerGDN
@@ -647,10 +647,11 @@ def _debugmodel(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=True,
             sharding_config=multimodal_token_embedding_sharding_config(),
         ),
         lm_head=Linear.Config(
@@ -719,10 +720,11 @@ def _debugmodel_moe(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=True,
             sharding_config=multimodal_token_embedding_sharding_config(),
         ),
         lm_head=Linear.Config(
@@ -796,10 +798,11 @@ def _0_8b(
             ),
         ),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=True,
             sharding_config=multimodal_token_embedding_sharding_config(),
         ),
         lm_head=Linear.Config(
@@ -869,10 +872,11 @@ def _2b(
             ),
         ),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=True,
             sharding_config=multimodal_token_embedding_sharding_config(),
         ),
         lm_head=Linear.Config(
@@ -942,10 +946,11 @@ def _4b(
             ),
         ),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=True,
             sharding_config=multimodal_token_embedding_sharding_config(),
         ),
         lm_head=Linear.Config(
@@ -1010,10 +1015,11 @@ def _9b(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=True,
             sharding_config=multimodal_token_embedding_sharding_config(),
         ),
         lm_head=Linear.Config(
@@ -1078,10 +1084,11 @@ def _27b(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=True,
             sharding_config=multimodal_token_embedding_sharding_config(),
         ),
         lm_head=Linear.Config(
@@ -1149,10 +1156,11 @@ def _35b_a3b(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=True,
             sharding_config=multimodal_token_embedding_sharding_config(),
         ),
         lm_head=Linear.Config(
@@ -1224,10 +1232,11 @@ def _122b_a10b(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=True,
             sharding_config=multimodal_token_embedding_sharding_config(),
         ),
         lm_head=Linear.Config(
@@ -1299,10 +1308,11 @@ def _397b_a17b(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            replicate_output=True,
             sharding_config=multimodal_token_embedding_sharding_config(),
         ),
         lm_head=Linear.Config(

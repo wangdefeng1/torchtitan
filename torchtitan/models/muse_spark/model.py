@@ -900,9 +900,9 @@ class MuseSparkModel(MultimodalModel):
                 if self.final_norm_input_dtype is not None
                 else torch.bfloat16
             )
-            hidden_TD = self.norm(hidden_TD.to(final_norm_input_dtype)).to(
-                torch.bfloat16
-            )
+            hidden_TD = self._final_norm_and_gather(
+                hidden_TD.to(final_norm_input_dtype)
+            ).to(torch.bfloat16)
 
         if self._skip_lm_head:
             return hidden_TD
