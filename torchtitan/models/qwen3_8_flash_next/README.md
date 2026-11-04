@@ -143,6 +143,13 @@ The registered real-PG GB300 suite runs the TP2/EP2/SP fixture for ten steps
 and compares full-precision loss and gradient norm against its committed golden.
 [Golden provenance](../../../tests/assets/losses/real_pg/gb300/qwen3_8_flash_next.provenance.json)
 records the hardware, runtime, source and data hashes of the independent captures.
+
+The fixture uses the test tokenizer EOS ID 2003. PLE also uses this ID to
+fill missing n-gram history, so correcting the former 2047 default changes
+lookups at document starts and requires a new numerical golden. Two fresh
+independent GB300 launches and the registered export agree bitwise on all
+twenty loss/gradient-norm values; the comparison remains exact.
+
 Pipeline tests compare original-ID payloads and all stage parameter gradients
 with an unsplit model.
 

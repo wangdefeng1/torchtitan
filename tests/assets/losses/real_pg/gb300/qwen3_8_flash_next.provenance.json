@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "purpose": "Strict numerical regression of the reduced Flash-Next training fixture on GB300 GPUs",
-  "golden_sha256": "9314e9e77420783e8dfddbae7ef6748bca1ffc723b235e371324d8904813bb57",
+  "golden_sha256": "db49eb5b179a3ca7756bb41b16c7b4a8e5f84a10177bd1468595d2d92338f7f4",
   "source": {
     "repository": "pytorch/torchtitan",
-    "upstream_base": "a87db08ea73cbdd567ceb055bd9118fd4a4507b2",
-    "computation_commit": "07d0138e3203ec872fa54f39e3cd2b135a5584ac",
-    "computation_url": "https://github.com/shuhuayu/torchtitan/commit/07d0138e3203ec872fa54f39e3cd2b135a5584ac",
-    "gdn_determinism_commit": "b2aca890400219473344c3e7042e0c926cabefba",
+    "upstream_base": "73c4ebdac57de0d89bb20d5dfabed340449c8b0d",
+    "computation_commit": "37385a8f67a48719c2ac85270d08b4d1c2033fad",
+    "computation_url": "https://github.com/shuhuayu/torchtitan/commit/37385a8f67a48719c2ac85270d08b4d1c2033fad",
+    "gdn_determinism_commit": "223be194f7e6a7f70d35f6d5e23121125e5f3746",
     "files_sha256": {
       "scripts/_checkpoint_test_config.py": "ca3c576d1a4080f2b3cdb38b84c263be692aa63346049a94ff43da399c650e53",
       "scripts/loss_compare.py": "3773c8093311b691fe4c4aa6eaa425f5ea02b87fb180cd767a6c0acbbd25514c",
@@ -17,20 +17,20 @@
       "tests/integration_tests/gb300.py": "0ec17d2a548fd940d50b4e909d1ebb4b87ab1a8bc5828f2158b241fe04f1a9e1",
       "tests/integration_tests/run_tests.py": "2df6465cd03427f4aa0b35360465a0021de0c2d8d01d2bfb721264b00f61805f",
       "torchtitan/models/common/attention/cp_gdn.py": "3773b38d4fffdc9472d7a45ab8453800253fbcbdd2a781b7be0278edb4c96baa",
-      "torchtitan/models/common/attention/gdn.py": "360cd8edb9180febd278704735c4f4554c795710b5af138aa154e2a6e281f41b",
+      "torchtitan/models/common/attention/gdn.py": "6fe94fc0bddbc0c7d8b9900c925bf1701a5d6ce77d57c901fae11205caacf10e",
       "torchtitan/models/qwen3_8_flash_next/__init__.py": "6c24df602fabee22b1e94ed73a5b4de8098ea056d3e9e293a35bbddfa36b6e5e",
-      "torchtitan/models/qwen3_8_flash_next/attention.py": "df21f81a76c708d11996db408435d24ad7651667f73f21268113bdbc2a4708e4",
-      "torchtitan/models/qwen3_8_flash_next/embedding.py": "da8f44d879be58a4fd4ab419e4e8ed6f6aabe9f303a28694da4123e273807a79",
-      "torchtitan/models/qwen3_8_flash_next/flavors.py": "901394c766a9e4dbf6057b6e799463c9468a851b25fe910d7cc30d8fbc58f5b2",
-      "torchtitan/models/qwen3_8_flash_next/model.py": "84cdd5797afc6c2ff0b8d9c61c14a6db277dc50b7730aacebf1956315bb2d34b",
+      "torchtitan/models/qwen3_8_flash_next/attention.py": "10262198913cd0ee68b499a066ffcb953abe547cf3ee0d35fc43f75f7c7ca299",
+      "torchtitan/models/qwen3_8_flash_next/embedding.py": "8ee6727a99a614c2a99e1fe7cbeec04325e5459fa407b53ac8c2fe4e95e9ece6",
+      "torchtitan/models/qwen3_8_flash_next/flavors.py": "0b4bbbcc53caaf79656228142ce44e52eca2ae63bf9fd7189294097ca70d1f44",
+      "torchtitan/models/qwen3_8_flash_next/model.py": "7248d835a92165714eba43adb21fa653a352f68355d91522f06ea49d385fe1f3",
       "torchtitan/models/qwen3_8_flash_next/moe.py": "d477467306c6b530c1fce2946be698cc4e150b0d6af8bae1cc5cb31f55ae4384",
-      "torchtitan/models/qwen3_8_flash_next/norm.py": "0c74fa03b653e0808ad0ae0946ff428fe38d604893a1735c5bff0bc659f1b62b",
+      "torchtitan/models/qwen3_8_flash_next/norm.py": "4378fec390fd51a87fb5f23d993907fa6acfbd4d22928393efdff900664769ca",
       "torchtitan/models/qwen3_8_flash_next/residual.py": "e32c770d27f500b3db6bc886aae37444b26c5dbb4845d179eb029836c5f5fad5",
       "torchtitan/models/qwen3_8_flash_next/rope.py": "428427e9ccb005d0d4b00bece5253c86a6879baef64a50407140bb6c6db04d45",
       "torchtitan/models/qwen3_8_flash_next/sharding.py": "8d052f96c29eb172e876702098972953996f3e18d831c3898995c2deb831edf6",
-      "torchtitan/models/qwen3_8_flash_next/state_dict_adapter.py": "6739237ca2f31339d5f480ea47586adaf2452d152db730c3c6292e69036b0d6b",
-      "torchtitan_recipes/tests/models/llama3.py": "142d683548bf91da99e82f066b8707c988b2e3ab16122535c808bbfce80c6c46",
-      "torchtitan_recipes/tests/models/qwen3_8_flash_next.py": "a67ecbf5b577ead75fd1e4fda86df71673ebdbd657ecb939ac90ddbbefb28405"
+      "torchtitan/models/qwen3_8_flash_next/state_dict_adapter.py": "775631f171d92e90e261035bf55795b086875c99dcce9b4dfac546042427bdc9",
+      "torchtitan_recipes/tests/models/llama3.py": "a248bb7d8e9b72b304281491fd594e8f7ad2f0a53dac03672f9e36e8057853f9",
+      "torchtitan_recipes/tests/models/qwen3_8_flash_next.py": "acf34c8965d31cf1b1718ce38caa3b91245d121bb43020465d44dd8ec2ca752f"
     }
   },
   "reference": {
@@ -110,6 +110,9 @@
     "data": "tests/assets/c4_test/data.json; Grain, repeat=True, shuffle=False",
     "tokenizer_assets": "tests/assets/tokenizer",
     "seq_len": 64,
+    "eos_token_id": 2003,
+    "previous_eos_token_id": 2047,
+    "regeneration_reason": "PLE uses EOS for missing n-gram history as well as EOS resets; matching the tokenizer changes the lexical lookup at document starts.",
     "tokens_per_microbatch_per_dp_rank": 128,
     "optimizer": {
       "name": "AdamW",
