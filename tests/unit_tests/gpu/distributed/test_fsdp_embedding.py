@@ -55,10 +55,6 @@ class TestFSDPEmbedding(DTensorTestBase):
         tp_rank = tp_mesh.get_local_rank()
         dp, cp, tp = MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP
         input_layout = SpmdType({dp: spmd.S(0), cp: spmd.S(1), tp: spmd.R})
-        output_layout = SpmdType(
-            {dp: spmd.V, cp: spmd.V, tp: spmd.V},
-            partition_spec=spmd.PartitionSpec(dp, (cp, tp), None),
-        )
 
         for padding_idx, reshard_after_forward in product(
             (None, 5, 69, 127, -1), (False, True)
@@ -86,11 +82,9 @@ class TestFSDPEmbedding(DTensorTestBase):
                                 "weight": dense_param_placement(tp=spmd.S(0))
                             },
                             in_src_shardings={"input": input_layout},
-                            in_dst_shardings={"input": input_layout},
                             out_src_shardings=SpmdType(
                                 {dp: spmd.S(0), cp: spmd.S(1), tp: spmd.P}
                             ),
-                            out_dst_shardings=output_layout,
                             local_spmd=True,
                         ),
                     )
@@ -130,7 +124,14 @@ class TestFSDPEmbedding(DTensorTestBase):
 
                     with set_current_spmd_mesh(runtime_mesh), typecheck(local=False):
                         spmd.assert_type(tokens, input_layout)
-                        output = model(tokens)
+                        # The embedding returns a TP partial; reduce-scatter
+                        # it to sequence-sharded explicitly.
+                        output = spmd.redistribute(
+                            model(tokens),
+                            tp_mesh.get_group(),
+                            src=spmd.P,
+                            dst=spmd.S(1),
+                        )
                         if reshard_after_forward:
                             self.assertIs(embedding.weight, parameter)
                         else:

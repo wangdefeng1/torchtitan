@@ -79,36 +79,23 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         # The configs are sharded for SP when built; the transform keeps it.
         async_layer = async_model.layers[0]
 
-        self.assertIsNone(stock_layer.attention.sharding_config.in_dst_shardings)
-        self.assertIsNone(stock_layer.attention.sharding_config.out_dst_shardings)
-        self.assertIsNone(async_layer.attention.sharding_config.in_dst_shardings)
-        self.assertIsNone(async_layer.attention.sharding_config.out_dst_shardings)
-
         self.assertIsNone(stock_layer.attention.qkv_linear.sharding_config)
         self.assertIsNone(async_layer.attention.qkv_linear.sharding_config)
         self.assertIsNotNone(
             async_layer.attention.qkv_linear.wqkv.sharding_config.in_src_shardings
         )
-        self.assertIsNone(
-            async_layer.attention.qkv_linear.wqkv.sharding_config.in_dst_shardings
-        )
         self.assertIsNotNone(stock_layer.attention.wo.sharding_config.out_src_shardings)
-        self.assertIsNone(stock_layer.attention.wo.sharding_config.out_dst_shardings)
         self.assertIsNotNone(async_layer.attention.wo.sharding_config.out_src_shardings)
-        self.assertIsNone(async_layer.attention.wo.sharding_config.out_dst_shardings)
         self.assertIn(
             "weight", async_layer.attention.wo.sharding_config.state_shardings
         )
 
-        self.assertIsNone(async_layer.feed_forward.sharding_config.in_dst_shardings)
         self.assertIsNotNone(async_layer.feed_forward.sharding_config.out_src_shardings)
-        self.assertIsNone(async_layer.feed_forward.w13.sharding_config.in_dst_shardings)
         self.assertTrue(stock_layer.feed_forward.w13.sharding_config.local_spmd)
         self.assertTrue(async_layer.feed_forward.w13.sharding_config.local_spmd)
         self.assertIsNotNone(
             async_layer.feed_forward.w2.sharding_config.out_src_shardings
         )
-        self.assertIsNone(async_layer.feed_forward.w2.sharding_config.out_dst_shardings)
 
     def test_projection_boundaries_survive_lora_config_wrappers(self):
         """The transformed FFN boundary encloses LoRA projection work."""
@@ -120,13 +107,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         )
         layer = model.layers[0]
 
-        self.assertIsNone(layer.attention.sharding_config.in_dst_shardings)
         self.assertIsNone(layer.attention.qkv_linear.sharding_config)
-        self.assertIsNone(
-            layer.attention.qkv_linear.wqkv.sharding_config.in_dst_shardings
-        )
-        self.assertIsNone(layer.feed_forward.sharding_config.in_dst_shardings)
-        self.assertIsNone(layer.feed_forward.w13.sharding_config.in_dst_shardings)
 
 
 class TestAsyncTensorParallelSharding(DTensorTestBase):
@@ -168,12 +149,8 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         attn = attn_cfg.build().to(self.device_type)
         attn._parallelize(parallelism_context)
 
-        self.assertIsNone(attn._sharding_config.in_dst_shardings)
-        self.assertIsNone(attn._sharding_config.out_dst_shardings)
         self.assertIsNone(attn.qkv_linear._sharding_config)
-        self.assertIsNone(attn.qkv_linear.wqkv._sharding_config.in_dst_shardings)
         self.assertIsNotNone(attn.wo._sharding_config.out_src_shardings)
-        self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
 
     @with_comms
