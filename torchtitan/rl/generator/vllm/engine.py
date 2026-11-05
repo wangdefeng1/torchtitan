@@ -125,6 +125,13 @@ class VLLMEngine(GenerationEngine):
         """Keep each multi-turn session's cached prefix on GPU between its turns (see
         `VLLMSessionKVHolder`). None: off."""
 
+        def __post_init__(self) -> None:
+            if self.cuda_graph.vision_encoder and self.image_spec is None:
+                raise ValueError(
+                    "cuda_graph.vision_encoder captures the vision encoder of image "
+                    "prompts; set image_spec too, or unset it."
+                )
+
     def __init__(
         self,
         config: Config,

@@ -833,6 +833,20 @@ def test_cuda_graph_none_mode_preserves_sequence_parallel_config():
     assert compilation_config.pass_config.sp_min_token_num == 1
 
 
+def test_vision_encoder_cuda_graph_needs_decoder_graphs_and_image_prompts():
+    cfg = VLLMCudaGraphConfig(vision_encoder=True).get_vllm_compilation_config(
+        max_num_seqs=8,
+        expert_sequence_parallel_size=1,
+        enable_sequence_parallel=False,
+    )
+
+    assert cfg.cudagraph_mm_encoder
+    with pytest.raises(ValueError, match='mode other than "NONE"'):
+        VLLMCudaGraphConfig(mode="NONE", vision_encoder=True)
+    with pytest.raises(ValueError, match="set image_spec too"):
+        VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(vision_encoder=True))
+
+
 def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
     parallelism = InferenceParallelismConfig(
         tensor_parallel_degree=4,

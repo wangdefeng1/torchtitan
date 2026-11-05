@@ -24,6 +24,7 @@ from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.generator.vllm.multimodal import (
     _ImageProcessingInfo,
     _ImageProcessor,
+    _pad_segment_ids,
     image_prompt,
     mrope_hf_config,
     validate_image_model,
@@ -180,3 +181,38 @@ def test_validate_image_model_rejects_a_mismatched_cache_or_no_encoder():
         validate_image_model(config, dataclasses.replace(SPEC, patch_size=14))
     with pytest.raises(ValueError, match="no vision encoder"):
         validate_image_model(dataclasses.replace(config, vision_encoder=None), SPEC)
+
+
+def test_encoder_cudagraph_packs_images_and_pads_segments_with_no_image():
+    wrapper = SimpleNamespace(_image_spec=SPEC)
+    mm_kwargs = {
+        "images": ["a", "b", "c"],
+        "image_grid_thw": torch.tensor([[1, 4, 4], [1, 4, 6], [1, 8, 8]]),
+    }
+
+    specs = VLLMMultimodalModelWrapper.get_encoder_cudagraph_item_specs(
+        wrapper, mm_kwargs
+    )
+    selected = VLLMMultimodalModelWrapper.select_encoder_cudagraph_items(
+        wrapper, mm_kwargs, [2, 0]
+    )
+    budgets = VLLMMultimodalModelWrapper.get_encoder_cudagraph_budget_range(
+        wrapper,
+        SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=2048),
+            model_config=SimpleNamespace(max_model_len=4096),
+        ),
+    )
+    # A graph's buffer holds stale ids past the batch; padding must join no image.
+    buffer = torch.full((6,), 7, dtype=torch.int32)
+    _pad_segment_ids(buffer, torch.tensor([0, 0, 1], dtype=torch.int32))
+
+    assert [(spec.input_size, spec.output_tokens) for spec in specs] == [
+        (16, 4),
+        (24, 6),
+        (64, 16),
+    ]
+    assert selected == {"images": ["c", "a"], "image_grid_thw": [[1, 8, 8], [1, 4, 4]]}
+    # SPEC's 32 x 32-pixel minimum is one merged token.
+    assert budgets == (1, 2048)
+    assert buffer.tolist() == [0, 0, 1, -1, -1, -1]
