@@ -14,7 +14,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torchtitan.rl.generator.vllm import mooncake
+from torchtitan.rl.generator.vllm import cpu_kv_offload, mooncake
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.generator.vllm.worker import TorchTitanGPUModelRunner
 from vllm.config import DeviceConfig, KVTransferConfig, VllmConfig
@@ -44,7 +44,80 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
+from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
 from vllm.v1.worker import kv_connector_model_runner_mixin
+
+
+def test_cpu_store_waits_for_tp_workers_but_not_other_dp_replicas():
+    manager = SimpleCPUOffloadScheduler.__new__(SimpleCPUOffloadScheduler)
+    manager._expected_worker_count = 4  # TP=2, DP=2 external-launcher world.
+    manager._store_event_pending_counts = {}
+    manager._process_store_event = Mock()
+
+    def init(connector, *_):
+        connector.scheduler_manager = manager
+
+    with (
+        patch.object(
+            cpu_kv_offload.VllmSimpleCPUOffloadConnector, "__init__", new=init
+        ),
+        patch.object(
+            cpu_kv_offload, "get_tp_group", return_value=SimpleNamespace(world_size=2)
+        ),
+    ):
+        connector = cpu_kv_offload.SimpleCPUOffloadConnector(Mock(), Mock(), Mock())
+    aggregator = KVOutputAggregator(2)
+    for step in range(3):
+        outputs = [
+            ModelRunnerOutput.with_kv_conn_output_only(
+                KVConnectorOutput(
+                    kv_connector_worker_meta=SimpleCPUOffloadWorkerMetadata(
+                        {7: 1}
+                        if (rank == 0 and step == 0 or rank == 1 and step == 2)
+                        else {}
+                    )
+                )
+            )
+            for rank in range(2)
+        ]
+        connector.update_connector_output(
+            aggregator.aggregate(outputs).kv_connector_output
+        )
+        if step < 2:
+            manager._process_store_event.assert_not_called()
+    manager._process_store_event.assert_called_once_with(7)
+
+
+def test_cpu_receive_cleanup_preserves_lru_order_across_local_ids():
+    pool = BlockPool(5, True, 16)
+    blocks = pool.get_new_blocks(2)
+    for block in blocks:
+        pool._insert_block_hash(
+            block.block_id.to_bytes(8, "little"), block, num_tokens=16
+        )
+    scheduler = cpu_kv_offload.KVOffloadScheduler.__new__(
+        cpu_kv_offload.KVOffloadScheduler
+    )
+    scheduler.logical_request_ids = {"local-z": "first", "local-a": "second"}
+    scheduler.requests = {
+        key: SimpleNamespace(status=RequestStatus.WAITING_FOR_REMOTE_KVS)
+        for key in scheduler.logical_request_ids
+    }
+    scheduler.finished_recving_kv_req_ids = set()
+    assigned = dict(zip(scheduler.logical_request_ids, blocks))
+
+    def complete(output):
+        for local_id in output.finished_recving or ():
+            pool.free_blocks([assigned[local_id]])
+
+    scheduler.connector = Mock(update_connector_output=Mock(side_effect=complete))
+    scheduler._update_from_kv_xfer_finished(
+        KVConnectorOutput(finished_recving={"local-a", "local-z"})
+    )
+    # Unallocated blocks precede the two released blocks; their order must be
+    # logical-ID order even though the local ID order is reversed.
+    assert pool.get_new_blocks(4)[-2:] == blocks
 
 
 def test_no_forward_submits_tail_once_and_polls_delayed_completion():
@@ -133,7 +206,10 @@ def _coordinate_worker(rank, rendezvous):
         cpu_group=dist.group.WORLD,
     )
     try:
-        with patch.object(mooncake, "get_tp_group", return_value=group):
+        with (
+            patch.object(mooncake, "get_tp_group", return_value=group),
+            patch.object(cpu_kv_offload, "get_tp_group", return_value=group),
+        ):
             # A follower must never query independently. Pending and hit results
             # are both shared, including the load metadata consumed by allocation.
             connector = mooncake.MooncakeStoreConnector.__new__(
@@ -179,8 +255,9 @@ def _coordinate_worker(rank, rendezvous):
             # One shared work flag covers requests, pending KV and queued outputs.
             # A locally idle rank must keep stepping until every rank has drained.
             engine = VLLMEngine.__new__(VLLMEngine)
-            engine._coordinate_mooncake = True
-            engine._uses_mooncake_store = True
+            engine._session_kv_offload = None
+            engine._coordinate_kv_offload = True
+            engine._uses_kv_offload = True
             engine._loaded_policy_version = 0
             engine._reset_kv_cache_on_model_state_dict_load = False
             model = SimpleNamespace(
@@ -226,11 +303,11 @@ def _coordinate_worker(rank, rendezvous):
                         assert engine._loaded_policy_version == 1
 
                     # Single-rank generators use the same combined local condition.
-                    engine._coordinate_mooncake = False
+                    engine._coordinate_kv_offload = False
                     assert engine.has_unfinished_requests() == (
                         rank == 1 and source != "idle"
                     )
-                    engine._coordinate_mooncake = True
+                    engine._coordinate_kv_offload = True
 
             # Use upstream block accounting: the first save completion must not
             # release references, and a failed receive must wait for the other
@@ -240,7 +317,9 @@ def _coordinate_worker(rank, rendezvous):
             store_scheduler = MooncakeStoreScheduler.__new__(MooncakeStoreScheduler)
             store_scheduler._gpu_block_pool = pool
             store_scheduler._pinned_saves = {7: ([b.block_id for b in blocks], 2)}
-            scheduler = mooncake.MooncakeScheduler.__new__(mooncake.MooncakeScheduler)
+            scheduler = cpu_kv_offload.KVOffloadScheduler.__new__(
+                cpu_kv_offload.KVOffloadScheduler
+            )
             scheduler._kv_output_aggregator = KVOutputAggregator(2)
             local_ids = {
                 logical: f"{logical}-rank{rank}"
@@ -263,7 +342,7 @@ def _coordinate_worker(rank, rendezvous):
                 return {}
 
             with patch.object(
-                mooncake.Scheduler, "update_from_output", new=apply_output
+                cpu_kv_offload.Scheduler, "update_from_output", new=apply_output
             ):
                 for step in range(3):
                     report = rank == 0 and step == 0 or rank == 1 and step == 2
@@ -311,8 +390,9 @@ def test_lookup_and_delayed_completion_coordination(tmp_path):
 
 def test_idle_dp_forward_does_not_skip_queued_output_drain():
     engine = VLLMEngine.__new__(VLLMEngine)
-    engine._coordinate_mooncake = True
+    engine._coordinate_kv_offload = True
     engine._session_kv_holder = None
+    engine._session_kv_offload = None
     calls = []
 
     def coordinate(has_requests):
@@ -347,10 +427,10 @@ def test_scheduler_uses_resolved_async_setting(async_scheduling):
         scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
     )
     with (
-        patch.object(mooncake, "MooncakeScheduler") as sync,
-        patch.object(mooncake, "AsyncMooncakeScheduler") as async_,
+        patch.object(cpu_kv_offload, "KVOffloadScheduler") as sync,
+        patch.object(cpu_kv_offload, "AsyncKVOffloadScheduler") as async_,
     ):
-        result = mooncake.create_mooncake_scheduler(config)
+        result = cpu_kv_offload.create_kv_offload_scheduler(config)
         selected, other = (async_, sync) if async_scheduling else (sync, async_)
         assert result is selected.return_value
         selected.assert_called_once_with(config)
@@ -383,7 +463,9 @@ def test_each_dp_replica_has_own_lookup_server_and_save_quorum(rank):
 def test_priority_ties_use_logical_ids_across_waiting_queues(suffix):
     # Native vLLM orders these IDs differently depending on the random suffix.
     # A TP leader's lookup must never be applied to another request on a follower.
-    scheduler = mooncake.MooncakeScheduler.__new__(mooncake.MooncakeScheduler)
+    scheduler = cpu_kv_offload.KVOffloadScheduler.__new__(
+        cpu_kv_offload.KVOffloadScheduler
+    )
     scheduler.policy = SchedulingPolicy.PRIORITY
     scheduler.logical_request_ids = {}
     scheduler.local_request_ids = {}
@@ -391,10 +473,10 @@ def test_priority_ties_use_logical_ids_across_waiting_queues(suffix):
     scheduler.connector = None
     scheduler.log_stats = False
     scheduler.spec_decode_metrics_level = "none"
-    scheduler.waiting = mooncake._LogicalPriorityRequestQueue(
+    scheduler.waiting = cpu_kv_offload._LogicalPriorityRequestQueue(
         scheduler.logical_request_ids
     )
-    scheduler.skipped_waiting = mooncake._LogicalPriorityRequestQueue(
+    scheduler.skipped_waiting = cpu_kv_offload._LogicalPriorityRequestQueue(
         scheduler.logical_request_ids
     )
     requests = []
@@ -434,7 +516,9 @@ def test_priority_ties_use_logical_ids_across_waiting_queues(suffix):
 def test_terminal_cleanup_preserves_block_identity(late_receive, finished_status):
     # Use real queues and KV allocation/freeing without constructing a GPU worker.
     # Per-process string hash order must not change a later invalid block's owner.
-    scheduler = mooncake.MooncakeScheduler.__new__(mooncake.MooncakeScheduler)
+    scheduler = cpu_kv_offload.KVOffloadScheduler.__new__(
+        cpu_kv_offload.KVOffloadScheduler
+    )
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.defer_block_free = False

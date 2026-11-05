@@ -46,6 +46,7 @@ from torchtitan.rl.generator.vllm.registry import (
     vllm_attention_backend,
 )
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
+from torchtitan.rl.generator.vllm.session_kv_offload import SessionKVOffload
 from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
@@ -103,8 +104,8 @@ class VLLMEngine(GenerationEngine):
         """CUDA graph capture settings for the vLLM engine."""
 
         kv_transfer_config: KVTransferConfig | None = None
-        """Native vLLM configuration for MooncakeStoreConnector. None: no connector. See
-        ``MOONCAKE_STORE.md`` for shared CPU KV storage and lifecycle requirements."""
+        """Native vLLM KV offload configuration. None: no connector. See
+        ``SIMPLE_CPU_OFFLOAD.md`` (local) and ``MOONCAKE_STORE.md`` (distributed)."""
 
         extra_engine_args: dict[str, Any] = field(default_factory=dict)
         """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
@@ -124,9 +125,12 @@ class VLLMEngine(GenerationEngine):
             if self.kv_transfer_config is None:
                 return
             # TODO(acisseJZhong): support additional KV connectors, including MultiConnector.
-            if self.kv_transfer_config.kv_connector != "MooncakeStoreConnector":
+            if self.kv_transfer_config.kv_connector not in (
+                "MooncakeStoreConnector",
+                "SimpleCPUOffloadConnector",
+            ):
                 raise ValueError(
-                    "Titan RL currently supports only MooncakeStoreConnector; "
+                    "Titan RL supports MooncakeStoreConnector and SimpleCPUOffloadConnector; "
                     "MultiConnector and other KV connectors are not supported."
                 )
 
@@ -149,32 +153,34 @@ class VLLMEngine(GenerationEngine):
         generator_name: str,
         output_dir: str,
     ):
-        self._uses_mooncake_store = config.kv_transfer_config is not None
-        self._coordinate_mooncake = self._uses_mooncake_store and (
+        self._uses_kv_offload = config.kv_transfer_config is not None
+        self._coordinate_kv_offload = self._uses_kv_offload and (
             parallelism.tensor_parallel_degree * parallelism.data_parallel_degree > 1
         )
         if config.kv_transfer_config is not None:
-            if (
-                self._coordinate_mooncake
-                and config.kv_transfer_config.kv_connector_module_path
-                not in (
-                    None,
-                    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector",
-                )
+            if config.kv_transfer_config.kv_connector_module_path not in (
+                None,
+                (
+                    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector"
+                    if config.kv_transfer_config.kv_connector
+                    == "MooncakeStoreConnector"
+                    else "vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector"
+                ),
             ):
                 raise ValueError(
-                    "Multi-GPU Mooncake Store requires vLLM's built-in connector in "
-                    "user config. Titan installs its coordination adapter automatically; "
+                    "KV offload requires vLLM's built-in connector in "
+                    "user config. Titan installs its lifecycle adapter automatically; "
                     "user-provided custom kv_connector_module_path values are not supported."
                 )
-            cache_prefix = config.kv_transfer_config.kv_connector_extra_config.get(
-                "cache_prefix"
-            )
-            if not isinstance(cache_prefix, str) or not cache_prefix.strip():
-                raise ValueError("Mooncake Store requires a non-empty cache_prefix")
+            if config.kv_transfer_config.kv_connector == "MooncakeStoreConnector":
+                cache_prefix = config.kv_transfer_config.kv_connector_extra_config.get(
+                    "cache_prefix"
+                )
+                if not isinstance(cache_prefix, str) or not cache_prefix.strip():
+                    raise ValueError("Mooncake Store requires a non-empty cache_prefix")
             if reset_kv_cache_on_model_state_dict_load:
                 raise ValueError(
-                    "Mooncake Store requires reset_kv_cache_on_model_state_dict_load=False: "
+                    "KV offload requires reset_kv_cache_on_model_state_dict_load=False: "
                     "asynchronous saves can still hold GPU blocks after requests finish. "
                     "Policy-version salts isolate KV without resetting the cache."
                 )
@@ -187,7 +193,7 @@ class VLLMEngine(GenerationEngine):
                 "cannot reset the prefix cache while blocks are held"
             )
         self.config = config
-        # Initial random weights must never publish shared KV as trainer version 0.
+        # Initial random weights must never cache KV as trainer version 0.
         self._loaded_policy_version: int | None = None
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
@@ -225,6 +231,11 @@ class VLLMEngine(GenerationEngine):
         logger.info("Initializing LLMEngine from EngineArgs...")
         self._engine = LLMEngine.from_engine_args(
             engine_args, stat_loggers=stat_loggers
+        )
+        self._session_kv_offload = (
+            SessionKVOffload(self._engine.engine_core.engine_core.scheduler)
+            if self._uses_kv_offload
+            else None
         )
         # Every rank holds the same blocks in its own scheduler; only the engine loop thread
         # touches them.
@@ -333,25 +344,29 @@ class VLLMEngine(GenerationEngine):
         engine_kwargs["prefix_cache_retention_interval"] = None
         if self.config.kv_transfer_config is not None:
             extra = dict(self.config.kv_transfer_config.kv_connector_extra_config)
-            # This option names an IPC socket, not a network port. Independent
-            # generators on the same host must not bind/unlink each other's socket.
-            extra.setdefault(
-                "lookup_rpc_port",
-                sha256(
-                    f"{extra['cache_prefix']}:{generator_name}".encode()
-                ).hexdigest()[:16],
-            )
+            if self.config.kv_transfer_config.kv_connector == "MooncakeStoreConnector":
+                # This option names an IPC socket, not a network port. Independent
+                # generators on the same host must not bind/unlink each other's socket.
+                extra.setdefault(
+                    "lookup_rpc_port",
+                    sha256(
+                        f"{extra['cache_prefix']}:{generator_name}".encode()
+                    ).hexdigest()[:16],
+                )
             engine_kwargs["kv_transfer_config"] = replace(
                 self.config.kv_transfer_config,
                 kv_connector_extra_config=extra,
             )
-            if self._coordinate_mooncake:
-                engine_kwargs[
-                    "kv_transfer_config"
-                ].kv_connector_module_path = "torchtitan.rl.generator.vllm.mooncake"
+            engine_kwargs["kv_transfer_config"].kv_connector_module_path = (
+                "torchtitan.rl.generator.vllm.mooncake"
+                if self.config.kv_transfer_config.kv_connector
+                == "MooncakeStoreConnector"
+                else "torchtitan.rl.generator.vllm.cpu_kv_offload"
+            )
+            if self._coordinate_kv_offload:
                 engine_kwargs[
                     "scheduler_cls"
-                ] = "torchtitan.rl.generator.vllm.mooncake.create_mooncake_scheduler"
+                ] = "torchtitan.rl.generator.vllm.cpu_kv_offload.create_kv_offload_scheduler"
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
@@ -400,7 +415,9 @@ class VLLMEngine(GenerationEngine):
 
     @property
     def holds_session_kv(self) -> bool:
-        return self._session_kv_holder is not None
+        return (
+            self._session_kv_holder is not None or self._session_kv_offload is not None
+        )
 
     @property
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor]:
@@ -416,19 +433,17 @@ class VLLMEngine(GenerationEngine):
         rejected_requests: list[tuple[str, Exception]] = []
         for request in requests:
             prompt = {"prompt_token_ids": request.prompt_token_ids}
-            if self._uses_mooncake_store:
+            if self._uses_kv_offload:
                 if self._loaded_policy_version is None:
                     rejected_requests.append(
                         (
                             request.request_id,
-                            ValueError(
-                                "Load trainer weights before using Mooncake Store"
-                            ),
+                            ValueError("Load trainer weights before using KV offload"),
                         )
                     )
                     continue
                 # A rollout group's minimum version can outlive a weight update.
-                # Shared KV must identify the weights that actually computed it.
+                # Cached KV must identify the weights that actually computed it.
                 prompt["cache_salt"] = str(self._loaded_policy_version)
             elif not self._reset_kv_cache_on_model_state_dict_load:
                 # Salt by the pinned version so a request only reuses KV
@@ -447,7 +462,7 @@ class VLLMEngine(GenerationEngine):
                 # vllm.inputs.tokens_input.
                 [engine_input] = self._engine.renderer.render_cmpl([prompt])
                 sampling_params = _build_sampling_params(request.sampling)
-                if self._coordinate_mooncake:
+                if self._coordinate_kv_offload:
                     # titan_request_id is a copy of Titan's request.request_id,
                     # shared by all TP ranks. vLLM may randomize its internal ID;
                     # this metadata preserves the original ID so the scheduler
@@ -463,6 +478,14 @@ class VLLMEngine(GenerationEngine):
                     arrival_time=request.arrival_time,
                     priority=max(request.group_id, -1),
                 )
+                if self._session_kv_offload is not None:
+                    self._session_kv_offload.track(
+                        self._engine.engine_core.engine_core.scheduler.requests[
+                            internal_request_id
+                        ],
+                        request.routing_session_id,
+                        request.group_id,
+                    )
                 if self._session_kv_holder is not None:
                     self._session_kv_holder.track(
                         internal_request_id,
@@ -475,7 +498,7 @@ class VLLMEngine(GenerationEngine):
 
     def has_unfinished_requests(self) -> bool:
         """Whether requests or their remaining KV work need more engine steps."""
-        if self._uses_mooncake_store:
+        if self._uses_kv_offload:
             return self._sync_unfinished_requests()
         return self._engine.has_unfinished_requests()
 
@@ -489,12 +512,16 @@ class VLLMEngine(GenerationEngine):
             self._engine.output_processor.has_unfinished_requests()
             or core.scheduler.has_requests()
             or bool(core.batch_queue)
+            or (
+                self._session_kv_offload is not None
+                and self._session_kv_offload.has_pending_work
+            )
         )
 
     def _sync_unfinished_requests(self) -> bool:
         # All ranks enter this check before stepping and use the result directly.
         has_work = self._has_unfinished_local_requests()
-        if self._coordinate_mooncake:
+        if self._coordinate_kv_offload:
             work = torch.tensor(has_work, dtype=torch.int32)
             dist.all_reduce(
                 work, op=dist.ReduceOp.MAX, group=get_world_group().cpu_group
@@ -504,7 +531,7 @@ class VLLMEngine(GenerationEngine):
 
     def step(self) -> list[FinishedRequest]:
         """Run one engine step, a TP collective, and return the requests it finished."""
-        if self._coordinate_mooncake and self._engine.dp_group is not None:
+        if self._coordinate_kv_offload and self._engine.dp_group is not None:
             core = self._engine.engine_core.engine_core
             # Idle DP replicas must still join the EP forward. Include KV-only
             # steps, which upstream executes as dummy forwards under DP.
@@ -518,11 +545,17 @@ class VLLMEngine(GenerationEngine):
             request_outputs = self._engine.step()
         if self._session_kv_holder is not None:
             self._session_kv_holder.after_step()
+        if self._session_kv_offload is not None:
+            self._session_kv_offload.after_step()
         return [_finished_request(request_output) for request_output in request_outputs]
 
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
+        if not session_ids and not group_ids:
+            return
         if self._session_kv_holder is not None:
             self._session_kv_holder.release(session_ids, group_ids)
+        if self._session_kv_offload is not None:
+            self._session_kv_offload.release(session_ids, group_ids)
 
     def log_stats(self, step: int) -> None:
         if self._session_kv_holder is not None:
@@ -536,11 +569,11 @@ class VLLMEngine(GenerationEngine):
     def load_prefetched_model_state_dict(self, policy_version: int) -> None:
         """Copy the prefetched model state dict from pinned CPU memory into the model, and
         reset the KV cache when configured."""
-        if self._uses_mooncake_store:
+        if self._uses_kv_offload:
             # Every rank enters the weight-load boundary. Reject active generations
             # together, but allow saves of already-computed, versioned KV to finish.
             has_requests = self._engine.output_processor.has_unfinished_requests()
-            if self._coordinate_mooncake:
+            if self._coordinate_kv_offload:
                 active = torch.tensor(has_requests, dtype=torch.int32)
                 dist.all_reduce(
                     active, op=dist.ReduceOp.MAX, group=get_world_group().cpu_group
@@ -548,7 +581,7 @@ class VLLMEngine(GenerationEngine):
                 has_requests = bool(active.item())
             if has_requests:
                 raise RuntimeError(
-                    "Mooncake Store requires drained weight updates: set "
+                    "KV offload requires drained weight updates: set "
                     "generator_router.hot_swap=False before loading weights"
                 )
         model = self._get_model()

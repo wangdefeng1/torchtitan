@@ -109,7 +109,7 @@ def generate() -> None:
         )
     if engine_config.kv_transfer_config is not None:
         raise ValueError(
-            "generate.py does not yet support Mooncake Store: it needs "
+            "generate.py does not yet support KV offload: it needs "
             "checkpoint-specific cache isolation and asynchronous KV-save draining. "
             "Use the RL generator for now."
         )

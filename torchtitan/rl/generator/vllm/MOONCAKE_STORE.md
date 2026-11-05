@@ -94,12 +94,29 @@ generator_router = InterGeneratorRouter.Config(hot_swap=False)
   KV lookup and completion using shared logical request IDs while retaining
   rank-local vLLM IDs; DP groups coordinate progress. Use `num_generators` for
   independent replicas.
-- **Connector:** direct `MooncakeStoreConnector` only; multi-GPU mode requires
-  vLLM's built-in implementation. `kv_transfer_config=None` disables it.
-- **Sessions:** `session_kv_holder` retains local GPU KV; releasing it does not
-  remove shared Store entries.
-- **Unsupported:** `MultiConnector`, other connectors, batch-invariant mode,
+- **Connector:** select the built-in `MooncakeStoreConnector`; Titan installs its
+  lifecycle adapter. `kv_transfer_config=None` disables it. For local CPU offload,
+  use [SimpleCPU](SIMPLE_CPU_OFFLOAD.md).
+- **Sessions:** `session_kv_holder` retains local GPU KV independently. Session
+  release also sends a best-effort CPU eviction hint, as described below.
+- **Unsupported:** `MultiConnector`, custom connectors, batch-invariant mode,
   and standalone `generate.py`.
+
+## Session release
+
+Titan forwards finished-session/group notifications to every generator and uses
+the same `connector.evict_blocks(released_hashes, active_hashes)` API as
+[SimpleCPU](SIMPLE_CPU_OFFLOAD.md#session-release). After requests and their
+outstanding save batch finish, each worker's Store layout maps the released
+hashes to keys. Deletion runs in the background with `batch_remove(force=False)`;
+the engine drains it before becoming idle. No global cache reset is used.
+
+This is best-effort deletion. Hashes used by known active sessions on the local
+DP replica are excluded at submission. Mooncake has no global session ownership:
+other replicas or newly admitted sessions may lose a cache hit and recompute.
+Store lease/replication checks can decline deletion, including leases refreshed
+by recent lookups. Rejected keys remain cached for normal Store eviction; the
+hint does not retry indefinitely. Later saves may publish the same prefix again.
 
 ## Multi-GPU coordination
 
@@ -109,7 +126,7 @@ coordinates two scopes within a generator:
 
 | Scope | What stays coordinated | Implementation |
 | --- | --- | --- |
-| **One TP group** | Request order, cache lookup results, transfer completion, and GPU block release for the same requests. | [mooncake.py](mooncake.py) |
+| **One TP group** | Request order, cache lookup results, transfer completion, and GPU block release for the same requests. | [lookup](mooncake.py), [shared coordination](cpu_kv_offload.py) |
 | **All ranks in a generator** | Whether to keep stepping or wait; participation in EP forwards across DP replicas. | [engine.py](engine.py), [engine_loop.py](../engine_loop.py) |
 
 Independent generators share the Store but do not join these collectives.
@@ -172,7 +189,7 @@ Select idle RDMA-capable GPUs with `CUDA_VISIBLE_DEVICES` and run from the repo
 root. The full matrix needs eight GPUs; use `-k 'not tp2 and not dp2'` for two.
 
 ```bash
-RUN_MOONCAKE_TEST=1 pytest -s tests/rl/unit_tests/gpu/test_mooncake_store.py
+RUN_MOONCAKE_TEST=1 pytest -s tests/rl/unit_tests/gpu/test_kv_offload.py
 ```
 
 Tests cover shared KV reuse, policy-version isolation, TP/DP/EP coordination,

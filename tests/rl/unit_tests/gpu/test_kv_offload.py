@@ -4,10 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Independent multi-rank generators sharing a real Mooncake CPU store.
+"""CPU KV offload with real model execution and transfers (up to eight GPUs).
 
-Run explicitly with RUN_MOONCAKE_TEST=1. Requires mooncake-transfer-engine,
-mooncake_master on PATH, and idle GPUs with working GPUDirect RDMA (up to eight for TP x DP/EP).
+Set RUN_CPU_OFFLOAD_TEST=1 for local CPU offload. RUN_MOONCAKE_TEST=1 also
+requires mooncake-transfer-engine, mooncake_master, and working GPUDirect RDMA.
 """
 
 import json
@@ -19,6 +19,7 @@ import subprocess
 import time
 import traceback
 import uuid
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import pytest
@@ -73,6 +74,7 @@ def _generator_worker(
         from torchtitan.tools.utils import has_cuda_capability
         from vllm.config import KVTransferConfig
         from vllm.distributed import cleanup_dist_env_and_memory, get_tp_group
+        from vllm.distributed.kv_transfer import get_kv_transfer_group
 
         torch.cuda.set_device(rank)
         dist.init_process_group("nccl", device_id=torch.device(f"cuda:{rank}"))
@@ -87,7 +89,8 @@ def _generator_worker(
             seq_len=2048,
         )
         model.local_compile.regions = []
-        if tp > 1:
+        is_mooncake = connector_args["kv_connector"] == "MooncakeStoreConnector"
+        if tp > 1 and is_mooncake:
             # Exercise shared pending-lookup decisions as well as hit/miss results.
             connector_args["kv_connector_extra_config"]["lookup_async"] = True
         engine = VLLMEngine.Config(
@@ -137,8 +140,10 @@ def _generator_worker(
                 tensor.normal_(mean=0.0, std=0.02)
         engine.load_prefetched_model_state_dict(0)
         scheduler = engine._engine.engine_core.engine_core.scheduler
-        store_scheduler = scheduler.connector.connector_scheduler
-        lookup_enabled = store_scheduler.enable_lookup
+        store_scheduler = (
+            scheduler.connector.connector_scheduler if is_mooncake else None
+        )
+        lookup_enabled = store_scheduler.enable_lookup if is_mooncake else False
         block_size = scheduler.block_size
         if prefix_match_unit is not None:
             assert scheduler.mamba_partial_cache_hit
@@ -146,6 +151,48 @@ def _generator_worker(
             ("ready", (block_size, str(torch.cuda.get_device_properties(rank).uuid)))
         )
         while (command := commands.get()) is not None:
+            if command == "release":
+                if is_mooncake:
+                    worker = get_kv_transfer_group().connector_worker
+                    hashes = set().union(
+                        *(h for _, h in engine._session_kv_offload._sessions.values())
+                    )
+                    keys = sorted(
+                        {
+                            db.store_layout.key_for(shard, h)
+                            for db in worker.token_dbs
+                            for shard in db.store_layout.local_shard_ids
+                            for h in hashes
+                        }
+                    )
+                    before = sum(worker.store.batch_is_exist(keys)) if keys else 0
+                    # Existence lookup renews the Master's default 10s lease.
+                    # Let it expire to exercise non-forced deletion, not refusal.
+                    time.sleep(11)
+                else:
+                    pool = scheduler.connector.scheduler_manager.cpu_block_pool
+                    cached = {
+                        b.block_id
+                        for b in pool.free_block_queue.get_all_free_blocks()
+                        if b.block_hash is not None
+                    }
+                    before = len(cached)
+                engine.release_sessions(["session-0"], [])
+                deadline = time.monotonic() + 60
+                while engine.has_unfinished_requests():
+                    assert (
+                        time.monotonic() < deadline
+                    ), "session eviction failed to drain"
+                    engine.step()
+                assert not engine._session_kv_offload.has_pending_work
+                if is_mooncake:
+                    after = sum(worker.store.batch_is_exist(keys)) if keys else 0
+                else:
+                    first_blocks = pool.free_block_queue.get_all_free_blocks()[:before]
+                    assert {b.block_id for b in first_blocks} == cached
+                    after = len(first_blocks)
+                results.put(("released", (before, after)))
+                continue
             version, prompt, clear_local, request_id, max_tokens, force_cold = command
             if version != engine._loaded_policy_version:
                 # Change real weights, not just the version label.
@@ -153,9 +200,12 @@ def _generator_worker(
                     tensor.mul_(0.75)
                 engine.load_prefetched_model_state_dict(version)
             # A cold reference bypasses both cache tiers without changing weights.
-            store_scheduler.enable_lookup = lookup_enabled and not force_cold
+            if is_mooncake:
+                store_scheduler.enable_lookup = lookup_enabled and not force_cold
             if clear_local or force_cold:
-                engine.release_sessions(["session-0"], [])
+                # Simulate GPU eviction between turns, not session completion.
+                if engine._session_kv_holder is not None:
+                    engine._session_kv_holder.release(["session-0"], [])
                 assert engine._engine.reset_prefix_cache(reset_connector=False)
             request = EngineRequest(
                 request_id=request_id,
@@ -174,6 +224,9 @@ def _generator_worker(
             # Idle DP replicas still participate in EP forwards and global progress.
             assert engine.add_requests([request] if prompt is not None else []) == []
             scheduler = engine._engine.engine_core.engine_core.scheduler
+            if not is_mooncake and force_cold:
+                for active in scheduler.requests.values():
+                    active.skip_reading_prefix_cache = True
             if tp > 1 and prompt is not None:
                 local_id = scheduler.local_request_ids[request_id]
                 ids = [None] * tp
@@ -186,10 +239,14 @@ def _generator_worker(
             def track_no_forward(scheduler_output, vllm_config):
                 nonlocal num_tail_saves
                 assert scheduler_output.total_num_scheduled_tokens == 0
-                num_tail_saves += sum(
-                    bool(req.can_save and req.boundary_state_offloads)
-                    for req in scheduler_output.kv_connector_metadata.requests
-                )
+                metadata = scheduler_output.kv_connector_metadata
+                if is_mooncake:
+                    num_tail_saves += sum(
+                        bool(req.can_save and req.boundary_state_offloads)
+                        for req in metadata.requests
+                    )
+                else:
+                    num_tail_saves += int(metadata.store_event >= 0)
                 return no_forward(scheduler_output, vllm_config)
 
             deadline = time.monotonic() + 60
@@ -204,15 +261,13 @@ def _generator_worker(
                     assert time.monotonic() < deadline, "KV transfer failed to drain"
                     finished.extend(engine.step())
             if prefix_match_unit is not None:
-                assert (
-                    not scheduler.connector.connector_scheduler.has_pending_push_work()
-                )
+                assert not scheduler.connector.has_pending_push_work()
                 assert all(
                     block.ref_cnt == 0
                     for block in scheduler.kv_cache_manager.block_pool.blocks
                     if not block.is_null
                 )
-            if engine._coordinate_mooncake:
+            if engine._coordinate_kv_offload:
                 assert not scheduler.local_request_ids
                 assert not scheduler.logical_request_ids
             if prompt is None:
@@ -243,17 +298,24 @@ def _generator_worker(
         raise
 
 
-@pytest.mark.skipif(
-    os.getenv("RUN_MOONCAKE_TEST") != "1",
-    reason="opt-in Mooncake RDMA integration test",
-)
 @pytest.mark.parametrize(
-    "roles, save_decode_cache, hold_sessions, block_size, tp, dp, ep, async_scheduling, prefix_match_unit",
+    "connector, roles, save_decode_cache, hold_sessions, block_size, tp, dp, ep, async_scheduling, prefix_match_unit",
     [
         pytest.param(
-            ("kv_both", "kv_both"), True, False, 256, 1, 1, 1, True, None, id="decode"
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            256,
+            1,
+            1,
+            1,
+            True,
+            None,
+            id="decode",
         ),
         pytest.param(
+            "MooncakeStoreConnector",
             ("kv_both", "kv_both"),
             False,
             False,
@@ -266,6 +328,7 @@ def _generator_worker(
             id="prompt-only",
         ),
         pytest.param(
+            "MooncakeStoreConnector",
             ("kv_producer", "kv_consumer"),
             None,
             False,
@@ -278,6 +341,7 @@ def _generator_worker(
             id="roles",
         ),
         pytest.param(
+            "MooncakeStoreConnector",
             ("kv_both", "kv_both"),
             True,
             True,
@@ -290,9 +354,20 @@ def _generator_worker(
             id="session-holder",
         ),
         pytest.param(
-            ("kv_both", "kv_both"), True, False, None, 2, 1, 1, True, None, id="tp2"
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            None,
+            2,
+            1,
+            1,
+            True,
+            None,
+            id="tp2",
         ),
         pytest.param(
+            "MooncakeStoreConnector",
             ("kv_both", "kv_both"),
             True,
             False,
@@ -305,9 +380,20 @@ def _generator_worker(
             id="tp2-sync",
         ),
         pytest.param(
-            ("kv_both", "kv_both"), True, False, None, 1, 2, 2, True, None, id="dp2-ep2"
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            None,
+            1,
+            2,
+            2,
+            True,
+            None,
+            id="dp2-ep2",
         ),
         pytest.param(
+            "MooncakeStoreConnector",
             ("kv_both", "kv_both"),
             True,
             False,
@@ -320,6 +406,7 @@ def _generator_worker(
             id="tp2-dp2-ep4",
         ),
         pytest.param(
+            "MooncakeStoreConnector",
             ("kv_both", "kv_both"),
             True,
             False,
@@ -332,6 +419,7 @@ def _generator_worker(
             id="hybrid-tail",
         ),
         pytest.param(
+            "MooncakeStoreConnector",
             ("kv_both", "kv_both"),
             True,
             False,
@@ -343,11 +431,64 @@ def _generator_worker(
             32,
             id="hybrid-tail-tp2",
         ),
+        pytest.param(
+            "SimpleCPUOffloadConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            256,
+            1,
+            1,
+            1,
+            True,
+            32,
+            id="cpu-hybrid-tail",
+        ),
+        pytest.param(
+            "SimpleCPUOffloadConnector",
+            ("kv_both", "kv_both"),
+            True,
+            True,
+            256,
+            2,
+            1,
+            1,
+            True,
+            None,
+            id="cpu-tp2-session",
+        ),
+        pytest.param(
+            "SimpleCPUOffloadConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            256,
+            2,
+            1,
+            1,
+            False,
+            32,
+            id="cpu-hybrid-tail-tp2",
+        ),
+        pytest.param(
+            "SimpleCPUOffloadConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            None,
+            2,
+            2,
+            4,
+            True,
+            None,
+            id="cpu-tp2-dp2-ep4",
+        ),
     ],
 )
-def test_shared_cpu_kv_and_weight_version_isolation(
+def test_cpu_kv_and_weight_version_isolation(
     tmp_path,
     monkeypatch,
+    connector,
     roles,
     save_decode_cache,
     hold_sessions,
@@ -358,6 +499,10 @@ def test_shared_cpu_kv_and_weight_version_isolation(
     async_scheduling,
     prefix_match_unit,
 ):
+    is_mooncake = connector == "MooncakeStoreConnector"
+    test_flag = "RUN_MOONCAKE_TEST" if is_mooncake else "RUN_CPU_OFFLOAD_TEST"
+    if os.getenv(test_flag) != "1":
+        pytest.skip(f"opt-in integration test: set {test_flag}=1")
     world_size = tp * dp
     assert torch.cuda.device_count() >= 2 * world_size
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -366,8 +511,9 @@ def test_shared_cpu_kv_and_weight_version_isolation(
         if visible_devices is not None
         else [str(i) for i in range(2 * world_size)]
     )
-    master = shutil.which("mooncake_master")
-    assert master is not None, "install mooncake-transfer-engine"
+    master = shutil.which("mooncake_master") if is_mooncake else None
+    if is_mooncake:
+        assert master is not None, "install mooncake-transfer-engine"
     port = _free_port()
     config = tmp_path / "store.json"
     config.write_text(
@@ -384,10 +530,11 @@ def test_shared_cpu_kv_and_weight_version_isolation(
             }
         )
     )
-    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config))
-    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
-    monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:False")
-    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
+    if is_mooncake:
+        monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config))
+        monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
+        monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:False")
+        monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
     context = multiprocessing.get_context("spawn")
     namespace = f"titan-test-{uuid.uuid4().hex}"
     processes = []
@@ -395,10 +542,10 @@ def test_shared_cpu_kv_and_weight_version_isolation(
         [master, f"--rpc_port={port}", "--rpc_thread_num=4"],
         stdout=log,
         stderr=log,
-    ) as server:
+    ) if is_mooncake else nullcontext() as server:
         try:
             deadline = time.monotonic() + 30
-            while True:
+            while is_mooncake:
                 try:
                     with socket.create_connection(("127.0.0.1", port), timeout=1):
                         break
@@ -409,11 +556,15 @@ def test_shared_cpu_kv_and_weight_version_isolation(
             queues = []
             block_sizes = []
             for gpu in range(2):
-                extra = {"cache_prefix": namespace}
-                if save_decode_cache is not None:
+                extra = (
+                    {"cache_prefix": namespace}
+                    if is_mooncake
+                    else {"cpu_bytes_to_use_per_rank": 1 << 30}
+                )
+                if is_mooncake and save_decode_cache is not None:
                     extra["save_decode_cache"] = save_decode_cache
                 connector_args = {
-                    "kv_connector": "MooncakeStoreConnector",
+                    "kv_connector": connector,
                     "kv_role": roles[gpu],
                     "kv_connector_extra_config": extra,
                 }
@@ -515,13 +666,22 @@ def test_shared_cpu_kv_and_weight_version_isolation(
             if prefix_match_unit is not None:
                 assert first[3] > 0, "must exercise a finish-time save without forward"
 
-            # B has never seen this prefix: its first hit must come from A's store.
+            # Local offload must reload on the same DP replica. Mooncake can
+            # instead load on an independent generator that has never seen it.
+            consumer = 1 if is_mooncake else 0
+            consumer_dp = dp - 1 if is_mooncake else 0
+            if not is_mooncake:
+                assert generate(1, 0, prompt)[2] == 0
             next_turn = prompt + first[0] + [42, 43]
-            continued = generate(1, 0, next_turn, target_dp=dp - 1)
+            continued = generate(
+                consumer, 0, next_turn, clear_local=True, target_dp=consumer_dp
+            )
             if prefix_match_unit is not None:
-                assert continued[2] >= len(
-                    prompt
-                ), "must reload the partial tail from CPU"
+                # SimpleCPU saves confirmed GPU cache blocks; a hybrid tail
+                # need not be present in every cache group. Mooncake explicitly
+                # saves the boundary state and can reuse the entire prompt.
+                minimum = len(prompt) if is_mooncake else cached_prompt_tokens
+                assert continued[2] >= minimum
             elif save_decode_cache:
                 assert continued[2] >= len(prompt) + cache_block_size
             else:
@@ -529,34 +689,55 @@ def test_shared_cpu_kv_and_weight_version_isolation(
 
             # Compare the continuation that actually consumes decode KV / hybrid
             # tails, not just the original prompt that cannot reuse those states.
-            cold = generate(1, 0, next_turn, target_dp=dp - 1, force_cold=True)
+            cold = generate(
+                consumer, 0, next_turn, target_dp=consumer_dp, force_cold=True
+            )
             assert cold[2] == 0
             assert continued[0] == cold[0]
             torch.testing.assert_close(
                 torch.tensor(continued[1]), torch.tensor(cold[1]), atol=0.02, rtol=0
             )
-            shared = generate(1, 0, prompt, clear_local=True, target_dp=dp - 1)
+            shared = generate(
+                consumer, 0, prompt, clear_local=True, target_dp=consumer_dp
+            )
             assert shared[2] >= cached_prompt_tokens
             assert shared[0] == first[0]
             torch.testing.assert_close(
                 torch.tensor(shared[1]), torch.tensor(first[1]), atol=0.02, rtol=0
             )
 
-            updated = generate(1, 1, prompt, target_dp=dp - 1)
+            updated = generate(consumer, 1, prompt, target_dp=consumer_dp)
             assert updated[2] == 0, "old policy KV must not match after a weight update"
             assert updated[1] != first[1], "the test must actually change model weights"
-            # Updating B must not purge A's still-valid version from the shared store.
-            old = generate(0, 0, prompt, clear_local=True)
+            # Updating one generator must not invalidate another's old-policy KV.
+            old = generate(0 if is_mooncake else 1, 0, prompt, clear_local=True)
             assert old[2] >= cached_prompt_tokens
             assert old[0] == first[0]
             print(
-                f"Mooncake cached tokens: cold={first[2]}, shared={shared[2]}, "
+                f"{connector} cached tokens: cold={first[2]}, shared={shared[2]}, "
                 f"next_turn={continued[2]}, new_policy={updated[2]}, old_policy={old[2]}"
             )
             if dp > 1:
                 # Both DP replicas work concurrently, then DP0 drains outputs and
                 # saves while DP1 is still decoding through EP collectives.
-                generate(0, 0, [51] + prompt, background_prompt=[52] + prompt)
+                generate(0, 1, [51] + prompt, background_prompt=[52] + prompt)
+            for rank_queues in queues:
+                for commands, _ in rank_queues:
+                    commands.put("release")
+            released = []
+            for rank_queues in queues:
+                for _, results in rank_queues:
+                    kind, payload = results.get(timeout=90)
+                    assert kind == "released", payload
+                    released.append(payload)
+            before = sum(item[0] for item in released)
+            after = sum(item[1] for item in released)
+            assert before > 0
+            if is_mooncake:
+                assert after < before, "session release must delete actual Store keys"
+            print(
+                f"Session release: {connector}, cached before={before}, after={after}"
+            )
             for rank_queues in queues:
                 for commands, _ in rank_queues:
                     commands.put(None)
@@ -568,5 +749,6 @@ def test_shared_cpu_kv_and_weight_version_isolation(
                 if process.is_alive():
                     process.terminate()
                 process.join(timeout=10)
-            server.terminate()
-            server.wait(timeout=10)
+            if server is not None:
+                server.terminate()
+                server.wait(timeout=10)

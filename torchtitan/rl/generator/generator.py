@@ -407,8 +407,7 @@ class Generator(Configurable):
         self._engine_loop.release_groups(group_ids)
 
     async def release_sessions(self, session_ids: list[str]) -> None:
-        """Release the held KV of sessions whose rollout ended (rank 0; a no-op unless the
-        engine holds session KV).
+        """Release retained GPU KV and hint CPU eviction for finished sessions.
 
         Args:
             session_ids: Routing session ids with no more generation calls.

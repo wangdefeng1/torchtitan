@@ -148,14 +148,15 @@ def _vllm_engine(
     engine = VLLMEngine.__new__(VLLMEngine)
     engine._engine = _FakeLLMEngine()
     engine.config = VLLMEngine.Config(kv_transfer_config=kv_transfer_config)
-    engine._uses_mooncake_store = kv_transfer_config is not None
-    engine._coordinate_mooncake = False
+    engine._uses_kv_offload = kv_transfer_config is not None
+    engine._coordinate_kv_offload = False
     engine._loaded_policy_version = None
     engine._reset_kv_cache_on_model_state_dict_load = (
         reset_kv_cache_on_model_state_dict_load
     )
     engine._get_model = lambda: model
     engine._session_kv_holder = None
+    engine._session_kv_offload = None
     return engine
 
 
@@ -796,6 +797,36 @@ def test_mooncake_engine_args_and_namespace(monkeypatch, tmp_path):
     assert transfer == original
 
 
+def test_simple_cpu_offload_uses_shared_coordination_without_store_settings(
+    monkeypatch, tmp_path
+):
+    transfer = KVTransferConfig(
+        kv_connector="SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use_per_rank": 1 << 30},
+    )
+    original = copy.deepcopy(transfer)
+    kwargs = _build_engine_kwargs(
+        monkeypatch,
+        tmp_path,
+        Generator.Config(
+            model=_MODEL_CONFIG,
+            parallelism=InferenceParallelismConfig(tensor_parallel_degree=2),
+            engine=VLLMEngine.Config(kv_transfer_config=transfer),
+        ),
+    )
+    resolved = kwargs["kv_transfer_config"]
+    assert (
+        resolved.kv_connector_module_path
+        == "torchtitan.rl.generator.vllm.cpu_kv_offload"
+    )
+    assert kwargs["scheduler_cls"].endswith(
+        "cpu_kv_offload.create_kv_offload_scheduler"
+    )
+    assert resolved.kv_connector_extra_config == original.kv_connector_extra_config
+    assert transfer == original
+
+
 @pytest.mark.parametrize("tp", [1, 2])
 def test_mooncake_lookup_sockets_are_generator_local(monkeypatch, tmp_path, tp):
     transfer = _mooncake_transfer_config()
@@ -827,11 +858,8 @@ def test_mooncake_does_not_silently_replace_custom_connector(monkeypatch, tmp_pa
         model=_MODEL_CONFIG,
         engine=VLLMEngine.Config(kv_transfer_config=transfer),
     )
-    single = _build_engine_kwargs(monkeypatch, tmp_path, config)
-    assert (
-        single["kv_transfer_config"].kv_connector_module_path
-        == transfer.kv_connector_module_path
-    )
+    with pytest.raises(ValueError, match="custom kv_connector_module_path"):
+        _build_engine_kwargs(monkeypatch, tmp_path, config)
 
     config.parallelism.tensor_parallel_degree = 2
     with pytest.raises(ValueError, match="custom kv_connector_module_path"):
@@ -871,10 +899,10 @@ def test_mooncake_passthrough_rejects_unsafe_settings(
 
 
 @pytest.mark.parametrize(
-    "connector", ["MultiConnector", "SimpleCPUOffloadConnector", "MooncakeConnector"]
+    "connector", ["MultiConnector", "OffloadingConnector", "MooncakeConnector"]
 )
 def test_unsupported_kv_connector_rejected_at_config_creation(connector):
-    with pytest.raises(ValueError, match="supports only MooncakeStoreConnector"):
+    with pytest.raises(ValueError, match="Titan RL supports"):
         VLLMEngine.Config(
             kv_transfer_config=KVTransferConfig(
                 kv_connector=connector,

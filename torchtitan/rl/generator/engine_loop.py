@@ -216,8 +216,7 @@ class EngineLoop:
             self._queue.put(SessionReleaseMessage(group_ids=group_ids))
 
     def release_sessions(self, session_ids: list[str]) -> None:
-        """RANK 0: release the held KV of sessions whose rollout ended (a no-op unless the
-        engine holds session KV)."""
+        """RANK 0: queue GPU retention release and CPU eviction for finished sessions."""
         if self._holds_session_kv and self._rank == 0:
             self._queue.put(SessionReleaseMessage(session_ids=session_ids))
 
@@ -563,7 +562,7 @@ class CloseMessage:
 
 @dataclass(kw_only=True, slots=True)
 class SessionReleaseMessage:
-    """Sessions (and every session of groups) whose held KV the engine loop releases; no reply."""
+    """Finished sessions/groups whose retained or offloaded KV may be reclaimed."""
 
     session_ids: list[str] = field(default_factory=list)
     group_ids: list[int] = field(default_factory=list)

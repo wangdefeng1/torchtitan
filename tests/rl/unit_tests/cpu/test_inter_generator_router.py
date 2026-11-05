@@ -385,8 +385,8 @@ def test_sticky_session_release_drops_its_assignment():
     asyncio.run(_run())
 
 
-def test_session_release_reaches_only_its_pinned_generator():
-    """The generator a session is pinned to releases its held KV."""
+def test_session_release_reaches_every_generator():
+    """Release also reaches caches left behind by a repinned session."""
 
     async def _run():
         actors = [_Actor("gen0"), _Actor("gen1")]
@@ -396,7 +396,7 @@ def test_session_release_reaches_only_its_pinned_generator():
         await router.release_session("s0")
 
         assert actors[0].release_sessions.calls == [((["s0"],), {})]
-        assert actors[1].release_sessions.calls == []
+        assert actors[1].release_sessions.calls == [((["s0"],), {})]
 
     asyncio.run(_run())
 
